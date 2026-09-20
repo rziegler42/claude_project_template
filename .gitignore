@@ -1,0 +1,23 @@
+# Personal Claude Code settings; shared project configuration may still be
+# committed under .claude/ or .opencode/ when the project uses it.
+/.claude/settings.local.json
+
+# Local environment files; keep a documented example when needed.
+.env
+.env.*
+!.env.example
+
+# Operating System files; never commit.
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+
+# Editor temporary files; never commit.
+*.swp
+*~
+
+# Rebuildable Graphify knowledge graph output
+/graphify-out/

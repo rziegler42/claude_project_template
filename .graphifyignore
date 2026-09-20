@@ -1,0 +1,11 @@
+# When Graphify is used, keep this file tracked so developers and automation
+# build the graph from the same inputs. Its presence does not require Graphify
+# to run for every task or session.
+#
+# Add project-specific exclusions for large generated data, vendored corpora,
+# snapshots, or fixtures only when they do not contribute useful architecture
+# or dependency relationships. Do not exclude all tests or JSON files by
+# default.
+
+# Personal retained diagnostics are local-only and must not influence the graph.
+/.debug/
