@@ -53,7 +53,7 @@ plan needs an increment between `B` and `C`, use the next letter-only suffix
 
 Before presenting a plan, check its labels and numbering, dependencies,
 verification and completion evidence, unresolved placeholders, risky actions,
-and unintended scope growth.
+unintended scope growth, and discovery/impact evidence or a documented skip.
 
 ## Archive format
 

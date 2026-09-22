@@ -58,6 +58,14 @@ Skip it when:
 - The task is an isolated test, documentation edit, or mechanical change.
 - The active plan already enumerates the complete file scope.
 
+For a substantive detailed plan, use one focused Graphify discovery or impact
+query when Graphify is configured, then record its freshness, purpose, and a
+conclusion verified against current source in the plan. When the scope, files,
+and precedents are already fully enumerated, record `Graphify: skipped —
+<concise reason>` instead. A non-current graph may orient discovery but is not
+evidence for a plan conclusion without that direct verification and recorded
+limitation.
+
 Refresh policy:
 
 - Do not build or refresh the graph automatically at session start.

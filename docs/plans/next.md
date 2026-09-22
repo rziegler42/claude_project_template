@@ -21,6 +21,12 @@ change it to Approved only after explicit approval. -->
 <!-- State verified assumptions, accepted decisions, compatibility boundaries,
 and any unresolved blocker or decision point. -->
 
+## Discovery and impact evidence
+
+<!-- For substantive work, when Graphify is configured, record graph freshness,
+the focused purpose, and the conclusion verified against current source. For a
+narrow fully enumerated scope, record `Graphify: skipped — <reason>` instead. -->
+
 ## Completion criteria
 
 <!-- State the observable evidence required to complete the whole plan. -->
