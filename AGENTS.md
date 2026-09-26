@@ -29,6 +29,9 @@ When sources disagree, use this order:
   Record durable conclusions in tracked documentation, decisions, or tests.
 - Do not commit, push, publish, deploy, install dependencies, use secrets, or
   perform destructive cleanup without explicit approval.
+- Commit messages and pull request descriptions describe the change only. Do not
+  mention the AI tool, model, or session that helped produce it, and do not add
+  `Co-Authored-By`, `Generated with`, or session-link lines for it.
 - Treat automated memory and prior conversation recall as potentially stale;
   current repository evidence wins.
 - Keep one active implementation plan in `docs/plans/next.md`; archive fully
