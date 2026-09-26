@@ -21,7 +21,7 @@ and in the associated implementation plan.
 - Use the next unused four-digit number: `0001-short-title.md`.
 - Do not reuse, renumber, or fill gaps in ADR numbers.
 - Keep each ADR concise: context, decision, alternatives, consequences,
-  verification, and related documents.
+  verification, and related files and decisions.
 
 ```markdown
 # NNNN: Decision title
@@ -34,7 +34,7 @@ Date: YYYY-MM-DD
 ## Alternatives considered
 ## Consequences
 ## Verification
-## Related documents
+## Related files and decisions
 ```
 
 ## Index
