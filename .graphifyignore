@@ -11,5 +11,5 @@
 /.debug/
 
 # The active plan is a working file that changes while the graph is queried; keep it out of
-# the graph. Plans are archived to docs/plans/archive/ when complete, which the graph still reads.
+# the graph. Archived plans (docs/plans/NNNN-*.md) are historical records and stay in it.
 /docs/plans/next.md
