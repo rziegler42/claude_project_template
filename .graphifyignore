@@ -9,3 +9,7 @@
 
 # Personal retained diagnostics are local-only and must not influence the graph.
 /.debug/
+
+# The active plan is a working file that changes while the graph is queried; keep it out of
+# the graph. Plans are archived to docs/plans/archive/ when complete, which the graph still reads.
+/docs/plans/next.md
