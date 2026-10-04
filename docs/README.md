@@ -8,6 +8,7 @@ and supporting evidence.
 | Location | Purpose |
 |---|---|
 | `architecture.md` | Current system architecture and behavioral contract |
+| `cad.md` | CAD source, export, and geometry-verification conventions |
 | `development.md` | Development, build, test, and verification guidance |
 | `decisions/` | Durable Architecture Decision Records (ADRs) |
 | `plans/` | Active and archived implementation plans |

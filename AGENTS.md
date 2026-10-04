@@ -96,3 +96,16 @@ Refresh policy:
 - A timeout or unknown result is inconclusive, not a pass. Record the engine,
   depth, timeout, and elapsed time, and keep counterexample traces until the
   finding is resolved.
+
+## CAD work (when used)
+
+For FreeCAD scripting, MCP `execute_code` work, mesh reverse engineering,
+image-to-CAD modelling, assemblies, or 3MF export, use the user-level
+`freecad-scripts` skill and follow `docs/cad.md`. Where `docs/cad.md` is more
+specific, the project convention wins over the skill's defaults.
+
+- Test unfamiliar API calls headless first (`freecadcmd`), then in the live GUI.
+- Do not rely on recalled FreeCAD API: the skill's deprecated-API table lists
+  calls that no longer exist in 1.1 (PySide2, `Support`, `import FEM`, and others).
+- Report measured results (deviation, volume, bounding box, degrees of freedom),
+  not only that a feature recomputed.

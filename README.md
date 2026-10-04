@@ -22,6 +22,7 @@ testing, and the full command reference.
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [CAD workflow](docs/cad.md)
 - [Development](docs/development.md)
 - [Documentation guide](docs/README.md)
 
