@@ -5,9 +5,9 @@ multiple ordered increments, but each increment should produce one coherent,
 reviewable result. When `next.md` is empty, no plan is active. Keep the plan
 short enough for a new session to understand without reconstructing history.
 Planning tools and skills may supply a method or content structure, but they do
-not override this location. Do not create a parallel active plan in
-`docs/superpowers/`, `.superpowers/`, or another tool-owned directory unless
-repository-owned instructions explicitly replace this lifecycle.
+not override this location. Put the active plan here; durable requirements and
+specifications belong in `docs/specs/`. Do not create tool-owned planning or
+specification directories.
 
 Begin each plan with its goal, scope, non-goals, assumptions, and whole-plan
 completion criteria. Label top-level increments with uppercase letters in

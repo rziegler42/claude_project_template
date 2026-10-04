@@ -36,10 +36,9 @@ When sources disagree, use this order:
   current repository evidence wins.
 - Keep one active implementation plan in `docs/plans/next.md`; archive fully
   verified or explicitly superseded plans according to `docs/plans/README.md`.
-- Planning tools and skills may guide plan construction, but they do not choose
-  a competing storage location. Do not create a parallel active plan in
-  `docs/superpowers/`, `.superpowers/`, or another tool-owned directory unless
-  repository instructions explicitly replace this lifecycle.
+- Planning tools and skills may guide plan construction, but repository plans
+  belong in `docs/plans/`. Put durable requirements and specifications in
+  `docs/specs/`; do not create tool-owned planning or specification directories.
 - Keep tracked, non-authoritative multi-plan direction in `docs/roadmaps/`.
   A roadmap does not authorize implementation or change an active plan.
 

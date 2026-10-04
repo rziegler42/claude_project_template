@@ -13,6 +13,7 @@ and supporting evidence.
 | `decisions/` | Durable Architecture Decision Records (ADRs) |
 | `plans/` | Active and archived implementation plans |
 | `roadmaps/` | Multi-plan direction, ordering, and dependencies |
+| `specs/` | Durable requirements and behavioral specifications |
 
 <!-- Add rows for reference/, perf/, security/, operations/, or other
 project-specific directories when created. -->
