@@ -82,7 +82,8 @@ the trust model, mitigations, and accepted residuals. In practice:
 - `LICENSE` — this repository's license. It is never copied; each project
   chooses its own.
 - `docs/` — this repository's own decisions and plans (not shipped).
-- `tests/` — `python3 -I -m unittest discover -s tests`.
+- `tests/` — `python3 -I -m unittest discover -s tests`; the `tests` profile in
+  `.claude/remote-runner.toml` runs the same suite on a Linux runner.
 
 ## Modules
 

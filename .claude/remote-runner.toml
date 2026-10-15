@@ -1,0 +1,10 @@
+# Remote-runner contract for this template repository itself (not shipped to
+# generated projects; see modules/claude for their stub).
+[project]
+id = "claude-project-template"
+
+[profiles.tests]
+command = "python3 -I -m unittest discover -s tests -v"
+
+[profiles.tests.requirements]
+os = "linux"
