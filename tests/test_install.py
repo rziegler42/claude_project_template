@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import select
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,45 @@ def run(argv, stdin_tty=False):
     finally:
         sys.stderr = original_stderr
     return code, "\n".join(lines), err
+
+
+def run_pty(argv, keystrokes, cwd, env, timeout=10):
+    """Run install.py on a pseudo-terminal; return (exit code, terminal output).
+
+    `keystrokes` is typed ahead: the terminal buffers it line by line, so each
+    prompt reads the next line, and "\\x04" at a line start is end-of-input.
+    """
+    import pty
+    import time
+
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-I", os.path.join(ROOT, "install.py")] + argv,
+        stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env, close_fds=True,
+    )
+    os.close(slave)
+    os.write(master, keystrokes.encode())
+    output = b""
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if ready:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+            elif proc.poll() is not None:
+                break
+    finally:
+        if proc.poll() is None:  # still blocked on a prompt: report it, do not hang
+            proc.kill()
+        proc.wait()
+        os.close(master)
+    return proc.returncode, output.decode("utf-8", "replace").replace("\r\n", "\n")
 
 
 def read_tree(root):
@@ -420,11 +460,100 @@ class InstallerTest(unittest.TestCase):
         with open(os.path.join(self.target(), ".template-manifest")) as handle:
             self.assertEqual(json.load(handle)["modules"], ["cad", "cad-freecad"])
 
+    def test_interrupt_is_a_quiet_exit(self):
+        def interrupted(args, out):
+            raise KeyboardInterrupt
+        original = install.cmd_new
+        install.cmd_new = interrupted
+        self.addCleanup(setattr, install, "cmd_new", original)
+        code, out, err = run([self.target()])
+        self.assertEqual(code, 130)
+        self.assertIn("interrupted", err)
+
     def test_list(self):
         code, out, err = run(["--list"])
         self.assertEqual(code, 0)
         self.assertIn("cad-freecad (requires cad)", out)
         self.assertIn("claude (harness)", out)
+
+
+@unittest.skipUnless(os.name == "posix", "pseudo-terminal tests need POSIX")
+class InteractivePromptTest(unittest.TestCase):
+    EMAIL = "typed@users.noreply.example.invalid"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        gitconfig = os.path.join(self.work, "global.gitconfig")
+        with open(gitconfig, "w") as handle:
+            handle.write("[user]\n\tname = Sentinel Global\n\temail = %s\n" % SENTINEL_EMAIL)
+        self.env = dict(os.environ, HOME=self.work, GIT_CONFIG_GLOBAL=gitconfig,
+                        GIT_CONFIG_SYSTEM=os.devnull)
+
+    def run_install(self, argv, keystrokes):
+        return run_pty(argv, keystrokes, self.work, self.env)
+
+    def local_config(self, name):
+        return subprocess.run(
+            ["git", "config", "--local", "--get", name],
+            cwd=os.path.join(self.work, "demo"), env=self.env, text=True, capture_output=True,
+        ).stdout.strip()
+
+    def test_module_and_identity_prompts_complete(self):
+        code, out = self.run_install(["demo"], "cad\nTyped User\n%s\n" % self.EMAIL)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Modules: cad", out)
+        self.assertEqual(self.local_config("user.name"), "Typed User")
+        self.assertEqual(self.local_config("user.email"), self.EMAIL)
+        self.assertNotIn(SENTINEL_EMAIL, out)
+
+    def test_blank_module_answer_means_no_modules(self):
+        code, out = self.run_install(["demo"], "\nTyped User\n%s\n" % self.EMAIL)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Modules: none", out)
+
+    def test_unknown_module_answer_is_refused_before_identity_prompt(self):
+        code, out = self.run_install(["demo"], "nosuch\n")
+        self.assertEqual(code, 2, out)
+        self.assertIn("unknown module", out)
+        self.assertNotIn("Git user.name", out)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "demo")))
+
+    def test_invalid_identity_is_refused_and_nothing_written(self):
+        code, out = self.run_install(["demo", "--with", "cad"], "\nnot-an-email\n")
+        self.assertEqual(code, 2, out)
+        self.assertIn("error:", out)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "demo")))
+
+    def test_end_of_input_at_each_prompt_is_a_clean_refusal(self):
+        cases = (
+            ("module prompt", ["demo"], "\x04"),
+            ("name prompt", ["demo", "--with", "cad"], "\x04"),
+            ("email prompt", ["demo", "--with", "cad"], "Typed User\n\x04"),
+        )
+        for label, argv, keys in cases:
+            with self.subTest(prompt=label):
+                code, out = self.run_install(argv, keys)
+                self.assertEqual(code, 2, out)
+                self.assertNotIn("Traceback", out)
+                self.assertIn("input ended", out)
+                self.assertFalse(os.path.exists(os.path.join(self.work, "demo")))
+
+    def test_bad_target_is_refused_before_any_prompt(self):
+        inside = os.path.join(ROOT, "refused-target")
+        code, out = self.run_install([inside], "cad\n")
+        self.assertEqual(code, 2, out)
+        self.assertIn("inside the template repository", out)
+        self.assertNotIn("Modules (", out)
+        self.assertFalse(os.path.exists(inside))
+
+    def test_unusable_project_id_is_refused_before_identity_prompt(self):
+        code, out = self.run_install(["demo", "--with", "claude", "--name=---"], "")
+        self.assertEqual(code, 2, out)
+        self.assertIn("project id", out)
+        self.assertNotIn("Git user.name", out)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "demo")))
 
 
 class ModuleHygieneTest(unittest.TestCase):

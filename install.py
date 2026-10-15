@@ -260,15 +260,22 @@ def validate_identity(name, email):
     return name, email
 
 
+def ask(prompt):
+    try:
+        return input(prompt)
+    except EOFError:
+        raise InstallError("input ended before the prompt was answered: %s" % prompt.strip())
+
+
 def resolve_identity(args, interactive):
     if args.use_global_git_identity:
         return None
     name, email = args.git_name, args.git_email
     if (name is None or email is None) and interactive:
         if name is None:
-            name = input("Git user.name for this project: ")
+            name = ask("Git user.name for this project: ")
         if email is None:
-            email = input(
+            email = ask(
                 "Git user.email for this project (a noreply address is recommended): "
             )
     if name is None or email is None:
@@ -371,22 +378,23 @@ def cmd_new(args, out):
     modules = load_modules()
     selected = parse_with(args.with_)
     interactive = sys.stdin.isatty()
+    # Everything that can fail without user input comes before any prompt.
+    target = check_target(args.target)
+    name = args.name or os.path.basename(target.rstrip(os.sep))
+    if not name or "\n" in name:
+        raise InstallError("invalid project name")
     if not args.with_ and interactive and not args.dry_run:
-        answer = input(
+        answer = ask(
             "Modules (comma separated, blank for none; available: %s): "
             % ", ".join(sorted(modules))
         )
         selected = parse_with(answer)
     names = resolve(selected, modules)
-    target = check_target(args.target)
-    name = args.name or os.path.basename(target.rstrip(os.sep))
-    if not name or "\n" in name:
-        raise InstallError("invalid project name")
+    tree = assemble(names, modules)
+    substitute(tree, name)
     identity = None
     if not args.dry_run:
         identity = resolve_identity(args, interactive)
-    tree = assemble(names, modules)
-    substitute(tree, name)
     commit, dirty = template_state()
     tree[MANIFEST] = manifest_bytes(names, commit, dirty)
 
@@ -552,6 +560,9 @@ def main(argv=None, out=print):
     except InstallError as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("\ninterrupted; nothing was written", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

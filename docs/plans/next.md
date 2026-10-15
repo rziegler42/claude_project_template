@@ -176,5 +176,22 @@ that failed before its fix.
 
 ## Result
 
-<!-- Complete this only after verification. Archive the plan according to
-base/docs/plans/README.md, then reset this file to the empty template. -->
+Increment A and B are committed (`27f7123`, `5822068`). Increment C, run on a
+pseudo-terminal before any change, observed:
+
+- Module prompt, identity prompts, blank module answer, unknown module name,
+  and invalid identity behaved as designed: local identity set from the typed
+  answers, sentinel global identity never used, nothing written on refusal.
+- **Defect 1 (confirmed):** end-of-input at any prompt printed a Python
+  traceback and exited 1. It now exits 2 with "input ended before the prompt
+  was answered".
+- **Defect 2 (confirmed):** the module prompt came before target validation,
+  and the identity prompts before name-to-id derivation and assembly, so a bad
+  target or unusable project id was reported only after the user typed
+  answers. Every check that needs no input now runs before the first prompt.
+- Ctrl-C now exits 130 with a one-line message instead of a traceback
+  (covered by a unit test, not a terminal signal).
+- Observed, left unchanged: `--dry-run` never prompts for modules, so an
+  interactive dry run without `--with` previews the no-module tree; an invalid
+  name or email is reported after both identity prompts, not after the
+  offending one.
