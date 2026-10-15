@@ -62,6 +62,8 @@ then B-B. -->
 <!-- Identify risky, irreversible, security-sensitive, or externally visible
 actions before implementation. Write "None identified" when applicable. -->
 
+<!-- @module-slot: plan-review -->
+
 ## Deferred work
 
 <!-- Record discoveries intentionally excluded from this plan. Remove this

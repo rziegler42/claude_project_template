@@ -1,0 +1,6 @@
+{
+  "description": "Tool-neutral policy for an independent, bounded, read-only review of an implementation plan, and a review receipt in the plan",
+  "requires": [],
+  "order": 15,
+  "hint": "when you want an independent opinion, ask for a review of docs/plans/next.md; the outcome is recorded in the plan's Second opinion section"
+}

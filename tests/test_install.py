@@ -16,7 +16,8 @@ install = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(install)
 
 SENTINEL_EMAIL = "sentinel-global@example.invalid"
-HARNESS_NAMES = ["claude-workflow", "remote-runner", "freecad-scripts", "graphify-semantic", "superpowers"]
+HARNESS_NAMES = ["claude-workflow", "remote-runner", "freecad-scripts", "graphify-semantic", "superpowers",
+                 "ask-codex", "second-opinion", "codex"]
 ALL = "cad-freecad,graphify,formal,claude"
 
 
@@ -849,6 +850,45 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--add", err)
         self.assertFalse(os.path.exists(self.target()))
+
+    # -- plan-review module (plan 0004, Increment A) ----------------------
+
+    def test_plan_review_inserts_policy_receipt_and_archive_note(self):
+        code, out, err = self.new("plan-review")
+        self.assertEqual(code, 0, err)
+        tree = read_tree(self.target())
+        agents = tree["AGENTS.md"]
+        self.assertIn("BEGIN module:plan-review slot:agents-guidance", agents)
+        for phrase in ("only when the owner asks", "read-only", "untrusted",
+                       "leave the machine", "does not replace the owner's approval"):
+            self.assertIn(phrase, agents)
+        plan = tree["docs/plans/next.md"]
+        self.assertIn("BEGIN module:plan-review slot:plan-review", plan)
+        self.assertIn("## Second opinion", plan)
+        self.assertLess(plan.index("## Second opinion"), plan.index("## Deferred work"))
+        self.assertIn("BEGIN module:plan-review slot:plans-review-note",
+                      tree["docs/plans/README.md"])
+        self.assertIn("plan-review: ", out)
+
+    def test_plan_review_text_absent_without_the_module(self):
+        self.new("graphify,cad")
+        tree = read_tree(self.target())
+        for path in ("AGENTS.md", "docs/plans/next.md", "docs/plans/README.md"):
+            self.assertNotIn("plan-review", tree[path].replace("@module-slot: plan-review", ""))
+        self.assertNotIn("Second opinion", tree["docs/plans/next.md"])
+        self.assertIn("@module-slot: plan-review", tree["docs/plans/next.md"])
+        self.assertIn("@module-slot: plans-review-note", tree["docs/plans/README.md"])
+
+    def test_add_plan_review_matches_fresh_install(self):
+        self.new("graphify")
+        code, out, err = run(["--add", "plan-review", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.new("graphify,plan-review", name="fresh", extra=["--name", "demo"])
+        added, fresh = read_tree(self.target()), read_tree(self.target("fresh"))
+        added.pop(".template-manifest"), fresh.pop(".template-manifest")
+        self.assertEqual(added.keys(), fresh.keys())
+        for path in fresh:
+            self.assertEqual(added[path], fresh[path], path)
 
     def test_interrupt_is_a_quiet_exit(self):
         def interrupted(args, out):

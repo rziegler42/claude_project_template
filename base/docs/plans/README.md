@@ -38,6 +38,8 @@ Archived plans record intended work, verification, and results. They are
 historical evidence, not durable architectural authority. Record lasting
 design constraints as ADRs under `docs/decisions/`.
 
+<!-- @module-slot: plans-review-note -->
+
 Do not collect unapproved plan fragments in ad hoc files under `docs/plans/`.
 Keep multi-plan direction in `docs/roadmaps/` instead.
 

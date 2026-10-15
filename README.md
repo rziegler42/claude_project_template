@@ -90,6 +90,7 @@ the trust model, mitigations, and accepted residuals. In practice:
 |---|---|
 | `claude` | Claude Code entry point (`CLAUDE.md` importing `AGENTS.md`), local-settings ignore line, and a `.claude/remote-runner.toml` stub with the project id and no active profile (harness) |
 | `graphify` | Graphify discovery/impact policy, `.graphifyignore`, plan evidence section |
+| `plan-review` | Tool-neutral policy for an independent, bounded, read-only review of the plan, and a Second opinion receipt in the plan and its archive |
 | `formal` | Tool-neutral formal verification guidance |
 | `cad` | Tool-neutral CAD workflow (`docs/cad.md`) |
 | `cad-freecad` | FreeCAD conventions; requires `cad` |
@@ -105,6 +106,24 @@ the trust model, mitigations, and accepted residuals. In practice:
    private helper or skill. Only modules marked `"harness": true` may be
    harness-specific.
 5. Run the tests; add a case if the module introduces new behavior.
+
+Slots available in `base/` (a fragment's file name is the slot name):
+
+| Slot | File | Position |
+|---|---|---|
+| `agents-guidance` | `AGENTS.md` | end of the working agreement |
+| `docs-index` | `docs/README.md` | documentation index list |
+| `readme-docs` | `README.md` | documentation links |
+| `development-tools` | `docs/development.md` | tool-specific guidance |
+| `plan-discovery` | `docs/plans/next.md` | before "Completion criteria" |
+| `plan-review` | `docs/plans/next.md` | before "Deferred work" |
+| `plans-review-note` | `docs/plans/README.md` | after the archive-format notes |
+| `gitignore` | `.gitignore` | end of the file |
+
+A slot marker added to `base/` is present only in projects created after it
+was added. `--add` for a module whose fragment needs a newer marker fails
+with "fragments with no matching slot marker" on an older project; the fix
+is to add the marker line by hand or create the project again.
 
 ## Boundaries
 
