@@ -26,6 +26,11 @@ Requirements: Python 3.9+ (standard library only) and git. macOS and Linux
   opts in and is reported. A non-noreply email produces a warning.
 - Required modules are added automatically (`cad-freecad` pulls in `cad`).
 - `/.debug/` is added to the new repository's `.git/info/exclude`.
+- `REPLACE_WITH_PROJECT_NAME` is replaced by the project name (the target
+  directory name, or `--name`). `REPLACE_WITH_PROJECT_ID` is the same name with
+  every character outside `[A-Za-z0-9_-]` replaced by `-`; it must start with a
+  letter or digit. The installer refuses a name that cannot form an id only
+  when a selected file uses the id.
 - The installer prints any `REPLACE_WITH_*` placeholders still to fill in and
   records the chosen modules in the tracked `.template-manifest`.
 
@@ -38,7 +43,8 @@ cd ../my-project
 
 `--add` works only on projects created by the installer (it needs
 `.template-manifest`). It refuses to overwrite a file that differs, is
-idempotent, and never commits.
+idempotent, and never commits. Name placeholders in a module's files are
+filled from the project directory name (or `--name`).
 
 ## Layout
 
@@ -59,7 +65,7 @@ idempotent, and never commits.
 
 | Module | Purpose |
 |---|---|
-| `claude` | Claude Code entry point (`CLAUDE.md` importing `AGENTS.md`) and local-settings ignore line (harness) |
+| `claude` | Claude Code entry point (`CLAUDE.md` importing `AGENTS.md`), local-settings ignore line, and a `.claude/remote-runner.toml` stub with the project id and no active profile (harness) |
 | `graphify` | Graphify discovery/impact policy, `.graphifyignore`, plan evidence section |
 | `formal` | Tool-neutral formal verification guidance |
 | `cad` | Tool-neutral CAD workflow (`docs/cad.md`) |

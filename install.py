@@ -27,6 +27,9 @@ SLOT_RE = re.compile(
     r"^(?P<open><!--|#)\s*@module-slot:\s*(?P<slot>[a-z0-9-]+)\s*(?P<close>-->)?\s*$"
 )
 PLACEHOLDER = "REPLACE_WITH_"
+NAME_PLACEHOLDER = b"REPLACE_WITH_PROJECT_NAME"
+ID_PLACEHOLDER = b"REPLACE_WITH_PROJECT_ID"
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 class InstallError(Exception):
@@ -268,6 +271,34 @@ def resolve_identity(args, interactive):
 # Commands
 
 
+def project_id(name):
+    """A runner-safe id derived from the project name, or an error."""
+    slug = re.sub(r"[^A-Za-z0-9_-]", "-", name)
+    if not ID_RE.match(slug):
+        raise InstallError(
+            "project id cannot be derived from name %r: it must start with a "
+            "letter or digit after replacing other characters with '-'; "
+            "pass --name" % name
+        )
+    return slug
+
+
+def substitute(tree, name):
+    """Replace the name and id placeholders in text files, in place.
+
+    The id is derived only when some file uses it, so a name that cannot form
+    an id is accepted for projects without such a file.
+    """
+    for rel, data in list(tree.items()):
+        if not is_text(data):
+            continue
+        if NAME_PLACEHOLDER in data:
+            data = data.replace(NAME_PLACEHOLDER, name.encode("utf-8"))
+        if ID_PLACEHOLDER in data:
+            data = data.replace(ID_PLACEHOLDER, project_id(name).encode("utf-8"))
+        tree[rel] = data
+
+
 def placeholder_summary(tree):
     counts = {}
     for path, data in sorted(tree.items()):
@@ -334,9 +365,7 @@ def cmd_new(args, out):
     if not args.dry_run:
         identity = resolve_identity(args, interactive)
     tree = assemble(names, modules)
-    for rel, data in list(tree.items()):
-        if is_text(data) and b"REPLACE_WITH_PROJECT_NAME" in data:
-            tree[rel] = data.replace(b"REPLACE_WITH_PROJECT_NAME", name.encode("utf-8"))
+    substitute(tree, name)
     commit, dirty = template_state()
     tree[MANIFEST] = manifest_bytes(names, commit, dirty)
 
@@ -409,9 +438,12 @@ def cmd_add(args, out):
         return 0
 
     # Module files: refuse to overwrite anything that differs.
+    project_name = args.name or os.path.basename(project.rstrip(os.sep))
     writes = {}
     for name in new:
-        for rel, data in collect_tree(os.path.join(modules[name]["path"], "files")).items():
+        files = collect_tree(os.path.join(modules[name]["path"], "files"))
+        substitute(files, project_name)
+        for rel, data in files.items():
             dest = os.path.join(project, *rel.split("/"))
             if os.path.exists(dest):
                 with open(dest, "rb") as handle:

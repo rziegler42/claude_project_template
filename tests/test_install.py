@@ -148,6 +148,74 @@ class InstallerTest(unittest.TestCase):
         code, out, err = self.new(name="other", extra=["--name", "Custom Name"])
         self.assertIn("# Custom Name", read_tree(self.target("other"))["README.md"])
 
+    # -- runner contract stub -----------------------------------------
+
+    STUB = ".claude/remote-runner.toml"
+
+    def test_runner_stub_shipped_with_claude(self):
+        code, out, err = self.new("claude", name="my-project")
+        self.assertEqual(code, 0, err)
+        tree = read_tree(self.target("my-project"))
+        self.assertIn(self.STUB, tree)
+        self.assertIn('id = "my-project"', tree[self.STUB])
+        self.assertNotIn("REPLACE_WITH_", tree[self.STUB])
+        self.assertNotIn(".claude/settings.local.json", tree)
+        self.assertNotIn("Unresolved placeholders:\n  .claude", out)
+
+    def test_runner_stub_declares_no_profile(self):
+        tomllib = None
+        try:
+            import tomllib
+        except ImportError:
+            self.skipTest("tomllib needs Python 3.11+")
+        self.new("claude")
+        with open(os.path.join(self.target(), self.STUB), "rb") as handle:
+            data = tomllib.load(handle)
+        self.assertEqual(list(data), ["project"])
+        self.assertEqual(list(data["project"]), ["id"])
+
+    def test_runner_stub_absent_without_claude(self):
+        self.new("graphify")
+        self.assertNotIn(self.STUB, read_tree(self.target()))
+
+    def test_runner_id_is_slugged_from_name(self):
+        for name, expected in (("My Project", "My-Project"), ('a"b\\c', "a-b-c"), ("x_y-1", "x_y-1")):
+            with self.subTest(name=name):
+                code, out, err = self.new("claude", name="p", extra=["--name", name])
+                self.assertEqual(code, 0, err)
+                text = read_tree(self.target("p"))[self.STUB]
+                self.assertIn('id = "%s"' % expected, text)
+                self.tmp_clear("p")
+
+    def tmp_clear(self, name):
+        import shutil
+        shutil.rmtree(self.target(name))
+
+    def test_unusable_runner_id_refused_before_writing(self):
+        for name in ("---", "\u65e5\u672c\u8a9e", "_x"):
+            with self.subTest(name=name):
+                code, out, err = self.new("claude", name="p", extra=["--name=" + name])
+                self.assertEqual(code, 2)
+                self.assertIn("project id", err)
+                self.assertFalse(os.path.exists(self.target("p")))
+
+    def test_unusable_runner_id_ok_without_a_runner_stub(self):
+        code, out, err = self.new("", name="p", extra=["--name=---"])
+        self.assertEqual(code, 0, err)
+
+    def test_add_claude_matches_fresh_install(self):
+        self.new("")
+        code, out, err = run(["--add", "claude", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.new("claude", name="fresh", extra=["--name", "demo"])
+        added = read_tree(self.target())
+        fresh = read_tree(self.target("fresh"))
+        added.pop(".template-manifest"), fresh.pop(".template-manifest")
+        self.assertEqual(added.keys(), fresh.keys())
+        for path in fresh:
+            self.assertEqual(added[path], fresh[path], path)
+        self.assertIn('id = "demo"', added[self.STUB])
+
     # -- git ----------------------------------------------------------
 
     def git(self, *args, cwd=None):
