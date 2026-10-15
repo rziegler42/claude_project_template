@@ -29,6 +29,7 @@ SLOT_RE = re.compile(
 PLACEHOLDER = "REPLACE_WITH_"
 NAME_PLACEHOLDER = b"REPLACE_WITH_PROJECT_NAME"
 ID_PLACEHOLDER = b"REPLACE_WITH_PROJECT_ID"
+HINT_MAX = 200
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
@@ -51,7 +52,8 @@ def load_modules(modules_dir=None):
             continue
         if not NAME_RE.match(name):
             raise InstallError("invalid module name: %r" % name)
-        meta = {"description": "", "requires": [], "order": 100, "harness": False}
+        meta = {"description": "", "requires": [], "order": 100, "harness": False,
+                "hint": None}
         meta_path = os.path.join(path, "module.json")
         if os.path.isfile(meta_path):
             with open(meta_path, encoding="utf-8") as handle:
@@ -59,6 +61,16 @@ def load_modules(modules_dir=None):
         for req in meta["requires"]:
             if not NAME_RE.match(req):
                 raise InstallError("module %s: invalid requirement %r" % (name, req))
+        hint = meta["hint"]
+        if hint is not None and not (
+            isinstance(hint, str)
+            and 0 < len(hint) <= HINT_MAX
+            and hint.isprintable()
+        ):
+            raise InstallError(
+                "module %s: hint must be a single printable line of 1-%d characters"
+                % (name, HINT_MAX)
+            )
         slots = {}
         slot_dir = os.path.join(path, "slots")
         if os.path.isdir(slot_dir):
@@ -309,6 +321,15 @@ def placeholder_summary(tree):
     return counts
 
 
+def emit_hints(out, names, modules, dry_run):
+    hints = [(n, modules[n]["hint"]) for n in names if modules[n]["hint"]]
+    if not hints:
+        return
+    out("Next steps (dry run, nothing written):" if dry_run else "Next steps:")
+    for name, hint in hints:
+        out("  %s: %s" % (name, hint))
+
+
 def parse_with(value):
     if not value:
         return []
@@ -378,6 +399,7 @@ def cmd_new(args, out):
     if args.dry_run:
         for rel in sorted(tree):
             out("  would write %s" % rel)
+        emit_hints(out, names, modules, True)
         out("Dry run: nothing written.")
         return 0
 
@@ -403,6 +425,7 @@ def cmd_new(args, out):
         out("Unresolved placeholders:")
         for rel, count in counts.items():
             out("  %s: %d" % (rel, count))
+    emit_hints(out, names, modules, False)
     return 0
 
 
@@ -487,11 +510,13 @@ def cmd_add(args, out):
     if args.dry_run:
         for rel in sorted(writes):
             out("  would write %s" % rel)
+        emit_hints(out, new, modules, True)
         out("Dry run: nothing written.")
         return 0
     write_tree(project, writes)
     for rel in sorted(writes):
         out("  wrote %s" % rel)
+    emit_hints(out, new, modules, False)
     return 0
 
 

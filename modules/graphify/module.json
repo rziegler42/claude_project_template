@@ -1,5 +1,6 @@
 {
   "description": "Graphify discovery and impact-analysis policy, .graphifyignore, graph output ignore, plan evidence section",
   "requires": [],
-  "order": 10
+  "order": 10,
+  "hint": "no graph exists yet; run `claude-workflow graph-doctor` when discovery or impact analysis is needed"
 }

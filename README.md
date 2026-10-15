@@ -51,7 +51,9 @@ filled from the project directory name (or `--name`).
 - `base/` — files every project receives (instructions, docs skeleton,
   plan/roadmap/spec/decision conventions).
 - `modules/<name>/` — opt-in content:
-  - `module.json` — `description`, `requires`, `order`, optional `harness`.
+  - `module.json` — `description`, `requires`, `order`, optional `harness`,
+    and optional `hint` (one printable line, at most 200 characters) that the
+    installer prints under "Next steps" after a new install or `--add`.
   - `files/` — copied verbatim to the same relative path.
   - `slots/<slot>.md` — fragments inserted at `@module-slot: <slot>` marker
     lines in `base/` files or other modules' files, wrapped in

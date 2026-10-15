@@ -307,6 +307,64 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("Unresolved placeholders", out)
         self.assertIn("docs/cad.md", out)
 
+    # -- post-install hints ---------------------------------------------
+
+    def fake_modules(self, specs):
+        """Point the installer at a temporary modules directory."""
+        root = os.path.join(self.work, "fake-modules")
+        os.makedirs(root, exist_ok=True)
+        for name, meta in specs.items():
+            os.makedirs(os.path.join(root, name), exist_ok=True)
+            with open(os.path.join(root, name, "module.json"), "w") as handle:
+                json.dump(meta, handle)
+        saved = install.MODULES_DIR
+        install.MODULES_DIR = root
+        self.addCleanup(setattr, install, "MODULES_DIR", saved)
+        return root
+
+    def test_graphify_hint_printed_for_new_project(self):
+        code, out, err = self.new("graphify")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Next steps:", out)
+        self.assertIn("graphify: ", out)
+        self.assertIn("graph-doctor", out)
+
+    def test_no_hint_when_no_selected_module_has_one(self):
+        code, out, err = self.new("cad")
+        self.assertNotIn("Next steps", out)
+
+    def test_hint_printed_by_add_only_for_new_modules(self):
+        self.new("")
+        code, out, err = run(["--add", "graphify", "--dir", self.target()])
+        self.assertIn("graph-doctor", out)
+        code, out, err = run(["--add", "graphify", "--dir", self.target()])
+        self.assertNotIn("graph-doctor", out)
+
+    def test_hint_labelled_in_dry_run(self):
+        code, out, err = self.new("graphify", extra=["--dry-run"])
+        self.assertIn("Next steps (dry run, nothing written):", out)
+        self.assertIn("graph-doctor", out)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_required_module_hint_is_printed_once(self):
+        self.fake_modules({
+            "lib": {"description": "x", "hint": "start with lib"},
+            "app": {"description": "y", "requires": ["lib"], "hint": "then app"},
+            "quiet": {"description": "z"},
+        })
+        code, out, err = self.new("app")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("start with lib"), 1)
+        self.assertEqual(out.count("then app"), 1)
+        self.assertNotIn("quiet", out.split("Next steps:")[1])
+
+    def test_invalid_hints_fail_module_loading(self):
+        for bad in (5, ["a"], "two\nlines", "x" * 201, "bell\x07", ""):
+            with self.subTest(hint=bad):
+                root = self.fake_modules({"m": {"description": "x", "hint": bad}})
+                with self.assertRaises(install.InstallError):
+                    install.load_modules(root)
+
     # -- --add --------------------------------------------------------
 
     def test_add_matches_fresh_install(self):
