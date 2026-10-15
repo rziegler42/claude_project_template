@@ -677,6 +677,90 @@ class InstallerTest(unittest.TestCase):
                 import shutil
                 shutil.rmtree(root)
 
+    # -- second review round (plan Increment C) ----------------------------
+
+    def test_add_does_not_write_through_a_hardlinked_file(self):
+        self.new("")
+        outside = self.outside_dir()
+        victim = os.path.join(outside, "victim.md")
+        link = os.path.join(self.target(), "AGENTS.md")
+        with open(link) as handle:
+            original = handle.read()
+        os.replace(link, victim)
+        os.link(victim, link)
+        run(["--add", "cad", "--dir", self.target()])
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), original)
+
+    def test_add_does_not_write_through_a_hardlinked_manifest(self):
+        self.new("")
+        outside = self.outside_dir()
+        victim = os.path.join(outside, "manifest")
+        link = os.path.join(self.target(), ".template-manifest")
+        os.replace(link, victim)
+        os.link(victim, link)
+        with open(victim) as handle:
+            original = handle.read()
+        run(["--add", "cad", "--dir", self.target()])
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), original)
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores file modes")
+    def test_add_with_unwritable_file_is_a_clean_refusal_and_writes_nothing(self):
+        self.new("")
+        agents = os.path.join(self.target(), "AGENTS.md")
+        os.chmod(agents, 0o444)
+        self.addCleanup(os.chmod, agents, 0o644)
+        before = read_tree(self.target())
+        code, out, err = run(["--add", "cad", "--dir", self.target()])
+        self.assertEqual(code, 2, out)
+        self.assertIn("error:", err)
+        self.assertEqual(before, read_tree(self.target()))
+
+    def test_symlinks_in_module_trees_are_refused(self):
+        outside = self.outside_dir()
+        secret = os.path.join(outside, "secret.txt")
+        with open(secret, "w") as handle:
+            handle.write("TOPSECRET\n")
+        cases = {}
+        root = self.fake_modules({"a": {"description": "x"}, "b": {"description": "x"},
+                                  "c": {"description": "x"}, "d": {"description": "x"}})
+        os.makedirs(os.path.join(root, "a", "slots"))
+        os.symlink(secret, os.path.join(root, "a", "slots", "gitignore.md"))
+        os.symlink(outside, os.path.join(root, "b", "files"))
+        os.symlink(outside, os.path.join(root, "c", "slots"))
+        os.replace(os.path.join(root, "d", "module.json"), os.path.join(outside, "module.json"))
+        os.symlink(os.path.join(outside, "module.json"), os.path.join(root, "d", "module.json"))
+        for name in "abcd":
+            with self.subTest(module=name):
+                with self.assertRaises(install.InstallError):
+                    modules = {}
+                    full = os.path.join(root, name)
+                    # load only this module so one refusal does not hide the others
+                    only = os.path.join(self.work, "only-" + name)
+                    os.makedirs(only)
+                    os.symlink(full, os.path.join(only, name))
+                    install.assemble([name], install.load_modules(only))
+        # a symlinked module directory itself
+        only = os.path.join(self.work, "only-dir")
+        os.makedirs(only)
+        os.symlink(outside, os.path.join(only, "linked"))
+        with self.assertRaises(install.InstallError):
+            install.load_modules(only)
+
+    def test_template_reached_through_a_symlink_still_refuses_targets_inside(self):
+        link = os.path.join(self.work, "tplink")
+        os.symlink(ROOT, link)
+        base_link = os.path.join(self.work, "lnkbase")
+        os.symlink(os.path.join(ROOT, "base"), base_link)
+        result = subprocess.run(
+            [sys.executable, "-I", os.path.join(link, "install.py"),
+             os.path.join(base_link, "newproj"), "--dry-run"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=20,
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("inside the template", result.stderr)
+
     def test_interrupt_is_a_quiet_exit(self):
         def interrupted(args, out):
             raise KeyboardInterrupt

@@ -19,6 +19,10 @@ Review and harden `install.py` and the module/slot loading it performs:
    inputs, fake `git` executable, symlinked project trees).
 3. Fixes for confirmed findings, tests first.
 4. An ADR recording the trust model and the accepted residuals.
+5. (Added at your request after Increment C.) An opt-in
+   `--skip-unsafe-entries` option for `--add`, so a project containing
+   symlinks or oversized files can be extended without relaxing any write
+   protection.
 
 ## Non-goals
 
@@ -26,8 +30,8 @@ Review and harden `install.py` and the module/slot loading it performs:
   and the contents of generated projects after creation.
 - `claude_global_config` helpers (`claude-workflow`, `remote-runner`) beyond
   how the generated stub refers to them.
-- New installer features. Behavior changes are limited to refusing or
-  neutralizing unsafe input.
+- New installer features, other than Increment D. Behavior changes are
+  limited to refusing or neutralizing unsafe input.
 
 ## Assumptions and constraints
 
@@ -132,6 +136,37 @@ Affected areas: `docs/decisions/0002-installer-trust-model.md`,
 3. Add a short "Security notes" section to `README.md`.
 
 Completion: ADR accepted by you; no unresolved reachable finding.
+
+### Increment D — `--skip-unsafe-entries` for `--add`
+
+Dependencies: Increment C (hardened walk and write checks)
+Affected areas: `install.py` (`scan_project`, `cmd_add`, argument parser),
+`tests/test_install.py`, `README.md`,
+`docs/decisions/0002-installer-trust-model.md`
+
+1. Tests first:
+   - with the option, a project containing a symlinked directory
+     (`.venv`-like), a symlinked file, a FIFO, and a file over the size cap
+     is extended, each skipped entry is listed in the output, and none of
+     them is read, patched, or written through;
+   - without the option, the same project is still refused (current
+     behavior unchanged);
+   - with the option, a module file or manifest whose target path is a
+     symlink, a hardlinked file, a read-only file, or under `.git` is still
+     refused with nothing written;
+   - with the option, a slot marker that exists only in a skipped file still
+     fails with "fragments with no matching slot marker";
+   - a symlinked project directory and a malformed manifest are refused with
+     the option; the option is rejected for a new-project install.
+2. Implement the option for `--add` only: `scan_project` skips and reports
+   symlinks, special files, and oversized files instead of raising; the
+   write-time checks are unchanged.
+3. Amend ADR 0002 (still Proposed) with the option, what it does and does not
+   relax, and the consequence that skipped files are not patched; describe it
+   in the README Security notes.
+
+Completion: tests pass; a scratch project with `.venv` links is extended with
+the option and refused without it; nothing outside the project changes.
 
 ## Verification
 
@@ -250,6 +285,32 @@ Optional findings, same method (tests failed first, now pass; suite 66):
 Behavior changes to note: `--add` refuses projects containing symlinks (no
 override); a manifest lacking `schema` is refused; new projects have no
 `.git/hooks` directory.
+
+### Increment C — independent bypass pass (implemented, awaiting commit)
+
+A fresh `security-reviewer`, given the trust model and the claimed
+protections but not the first-round findings, ran against a `git archive`
+copy of `66b492c`. The git subprocess hardening held. It found, and the new
+regression tests reproduced (7 failures + 1 error before the fix), five
+issues, now fixed (suite 71 tests):
+
+| # | Severity | Issue | Fix |
+|---|---|---|---|
+| 1 | Medium | A hardlinked project file (or manifest) was written in place, rewriting a file outside the project. | Writes go to a temporary sibling and are renamed; the link target is never written. |
+| 2 | Medium | `--add` was not atomic: an unwritable file gave a traceback after the manifest and new files were written, leaving it permanently inconsistent. | Existing targets must be writable (checked first); all temporaries are created before any rename, manifest renamed last; `OSError` is an `InstallError`. |
+| 3 | Medium | Module trees followed symlinks (slot files, `files/`, `module.json`, module directories): a forked module could read outside files into a project. | Module directory, `files/`, `slots/`, `module.json`, and slot files are refused when symlinks and read through `read_regular`. |
+| 4 | Low/Medium | Running the installer through a symlink to the template bypassed the "target inside template" check (`ROOT` was not resolved). | `ROOT` uses `realpath`. |
+| 5 | Low | Write-time TOCTOU: a parent directory swapped for a symlink after the check. | Not fixed; accepted residual in ADR 0002 (needs a concurrent local attacker; dir-fd operations would close it). |
+| 6 | Low | Usability: `--add` refuses `.venv`/`node_modules` symlinks and files over 16 MiB. | By design; documented in the README and ADR 0002. |
+
+Verified sound by the reviewer: scrubbed git environment (`GIT_CONFIG_COUNT`,
+`GIT_EXEC_PATH`, `GIT_DIR`, and others never reached git), `--template=`
+(no hooks directory), `.GIT` casefold, path normalization from `os.walk`,
+name injection (slugged id, substitution after slot expansion). Not run: a
+real symlink-swap race, non-APFS filesystems.
+
+ADR 0002 (Proposed) records the trust model, mitigations, and residuals;
+README has a Security notes section.
 
 <!-- Complete this only after verification. Archive the plan according to
 base/docs/plans/README.md, then reset this file to the empty template. -->

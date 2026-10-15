@@ -49,6 +49,22 @@ would write through) or non-regular files, a malformed manifest, and any module
 file under `.git/`. Name placeholders in a module's files are
 filled from the project directory name (or `--name`).
 
+## Security notes
+
+The installer treats everything in a project under `--add`, every command-line
+value, forked modules, and the caller's git environment as untrusted data. It
+writes only inside the target (or project) directory and its
+`.git/info/exclude`. See `docs/decisions/0002-installer-trust-model.md` for
+the trust model, mitigations, and accepted residuals. In practice:
+
+- `--add` refuses a project containing symlinks or non-regular files outside
+  `.git` (a `.venv` or `node_modules/.bin` will trigger this) and files over
+  16 MiB; run it on a clean checkout.
+- `git` subprocesses ignore `GIT_*` variables, configured helper programs,
+  and template directories; new repositories have no sample hooks.
+- Review a forked or edited module before using it; its files and slots are
+  copied into your project.
+
 ## Layout
 
 - `base/` — files every project receives (instructions, docs skeleton,

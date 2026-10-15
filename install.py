@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.realpath(__file__))
 BASE_DIR = os.path.join(ROOT, "base")
 MODULES_DIR = os.path.join(ROOT, "modules")
 MANIFEST = ".template-manifest"
@@ -44,6 +44,11 @@ class InstallError(Exception):
 # Modules
 
 
+def refuse_symlink(path, what):
+    if os.path.islink(path):
+        raise InstallError("symlink not allowed in %s: %s" % (what, path))
+
+
 def load_modules(modules_dir=None):
     modules_dir = modules_dir or MODULES_DIR
     modules = {}
@@ -51,6 +56,8 @@ def load_modules(modules_dir=None):
         return modules
     for name in sorted(os.listdir(modules_dir)):
         path = os.path.join(modules_dir, name)
+        if os.path.islink(path):
+            raise InstallError("symlink not allowed in modules: %s" % path)
         if not os.path.isdir(path):
             continue
         if not NAME_RE.match(name):
@@ -58,9 +65,11 @@ def load_modules(modules_dir=None):
         meta = {"description": "", "requires": [], "order": 100, "harness": False,
                 "hint": None}
         meta_path = os.path.join(path, "module.json")
-        if os.path.isfile(meta_path):
-            with open(meta_path, encoding="utf-8") as handle:
-                meta.update(json.load(handle))
+        if os.path.lexists(meta_path):
+            try:
+                meta.update(json.loads(read_regular(meta_path, MAX_MANIFEST_BYTES).decode("utf-8")))
+            except (ValueError, RecursionError, TypeError):
+                raise InstallError("module %s: module.json is not a valid JSON object" % name)
         for req in meta["requires"]:
             if not NAME_RE.match(req):
                 raise InstallError("module %s: invalid requirement %r" % (name, req))
@@ -76,6 +85,8 @@ def load_modules(modules_dir=None):
             )
         slots = {}
         slot_dir = os.path.join(path, "slots")
+        refuse_symlink(os.path.join(path, "files"), "module %s" % name)
+        refuse_symlink(slot_dir, "module %s" % name)
         if os.path.isdir(slot_dir):
             for entry in sorted(os.listdir(slot_dir)):
                 if not entry.endswith(".md"):
@@ -83,8 +94,7 @@ def load_modules(modules_dir=None):
                 slot = entry[:-3]
                 if not NAME_RE.match(slot):
                     raise InstallError("module %s: invalid slot name %r" % (name, slot))
-                with open(os.path.join(slot_dir, entry), encoding="utf-8") as handle:
-                    slots[slot] = handle.read()
+                slots[slot] = read_regular(os.path.join(slot_dir, entry)).decode("utf-8")
         meta.update(name=name, path=path, slots=slots)
         modules[name] = meta
     return modules
@@ -149,6 +159,8 @@ def collect_tree(source_dir):
     """Map relative POSIX path -> bytes; regular files only, no symlinks,
     no traversal, no git metadata."""
     files = {}
+    if os.path.islink(source_dir):
+        raise InstallError("symlink not allowed in template source: %s" % source_dir)
     if not os.path.isdir(source_dir):
         return files
     for dirpath, dirnames, filenames in os.walk(source_dir):
@@ -447,7 +459,8 @@ def check_target(target):
 
 
 def check_write_paths(root, rels):
-    """Refuse a write whose path goes through a symlink or onto a non-file."""
+    """Refuse a write whose path goes through a symlink, onto a non-file, or
+    onto a file the owner has made read-only."""
     for rel in rels:
         reject_git_metadata(rel)
         parts = rel.split("/")
@@ -463,17 +476,43 @@ def check_write_paths(root, rels):
                 raise InstallError("symlink not allowed: %s" % final)
             if not stat.S_ISREG(info.st_mode):
                 raise InstallError("not a regular file: %s" % final)
+            if not os.access(final, os.W_OK):
+                raise InstallError("not writable: %s" % final)
 
 
 def write_tree(target, tree):
+    """Write every file via a temporary sibling and rename, manifest last.
+
+    A rename replaces the directory entry, so a hardlinked file's other names
+    are never written through; if any temporary file cannot be created
+    nothing has been replaced yet.
+    """
     check_write_paths(target, list(tree))
-    for rel, data in tree.items():
-        dest = os.path.join(target, *rel.split("/"))
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(dest, flags, 0o666)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
+    order = sorted(tree, key=lambda rel: (rel == MANIFEST, rel))
+    staged = []
+    try:
+        for rel in order:
+            dest = os.path.join(target, *rel.split("/"))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            temp = "%s.install-%d.tmp" % (dest, os.getpid())
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(temp, flags, 0o666)
+            staged.append((temp, dest))
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(tree[rel])
+            if os.path.exists(dest):
+                os.chmod(temp, stat.S_IMODE(os.lstat(dest).st_mode))
+        for temp, dest in staged:
+            os.replace(temp, dest)
+        staged = []
+    except OSError as exc:
+        raise InstallError("cannot write %s: %s" % (exc.filename or target, exc.strerror or exc))
+    finally:
+        for temp, _ in staged:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
 
 
 def load_manifest(project):
