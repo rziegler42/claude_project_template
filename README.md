@@ -4,8 +4,8 @@ A harness-agnostic template for new software, hardware, and engineering
 projects. It is not a project itself: `install.py` assembles one from `base/`
 plus the opt-in modules you choose, then starts a fresh git repository.
 
-Requirements: Python 3.9+ (standard library only) and git. macOS and Linux
-(Windows via WSL).
+Requirements: a POSIX-compatible environment, Python 3.9+ (standard library
+only), and git.
 
 ## Create a project
 
