@@ -312,5 +312,17 @@ real symlink-swap race, non-APFS filesystems.
 ADR 0002 (Proposed) records the trust model, mitigations, and residuals;
 README has a Security notes section.
 
+### Increment D — `--skip-unsafe-entries` (implemented, awaiting commit)
+
+`install.py --add <module> --skip-unsafe-entries` skips and lists symlinks,
+special files, and oversized files in the project walk instead of refusing.
+Tests first (5 errors before, all passing; suite 76 tests): extends a project
+with `.venv`-style links, a symlinked directory and file, a FIFO, and a file
+over the cap; outside files untouched; still refused without the option;
+still refused for a symlinked file that needs patching ("no matching slot
+marker"), writes through a symlinked directory or existing file, a symlinked
+project directory, and a malformed manifest; rejected for a new project.
+ADR 0002 (Proposed) amended; README Security notes updated.
+
 <!-- Complete this only after verification. Archive the plan according to
 base/docs/plans/README.md, then reset this file to the empty template. -->

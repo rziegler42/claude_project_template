@@ -59,7 +59,9 @@ the trust model, mitigations, and accepted residuals. In practice:
 
 - `--add` refuses a project containing symlinks or non-regular files outside
   `.git` (a `.venv` or `node_modules/.bin` will trigger this) and files over
-  16 MiB; run it on a clean checkout.
+  16 MiB. Pass `--skip-unsafe-entries` to skip and list them instead; skipped
+  entries are never read, patched, or written through, and every write-time
+  check still applies.
 - `git` subprocesses ignore `GIT_*` variables, configured helper programs,
   and template directories; new repositories have no sample hooks.
 - Review a forked or edited module before using it; its files and slots are

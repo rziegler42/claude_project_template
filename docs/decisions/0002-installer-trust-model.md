@@ -1,6 +1,6 @@
 # 0002: Installer trust model and hardening
 
-Status: Proposed
+Status: Accepted
 Date: 2026-10-15
 
 ## Context
@@ -49,10 +49,21 @@ Mitigations, each covered by a regression test:
 - The template root is resolved with `realpath`, and a target is refused when
   it or any existing ancestor is the template, by identity.
 
+Opt-in relaxation: `--add --skip-unsafe-entries` skips, and lists, symlinks,
+special files, and files over the size cap in the project walk instead of
+refusing. A skipped entry is never read, patched, or written through; every
+write-time check, the symlinked-project-directory check, and manifest
+validation are unchanged. A slot marker that exists only in a skipped file
+still fails with "fragments with no matching slot marker". The option is
+rejected for a new-project install.
+
 ## Alternatives considered
 
 - Document that `--add` must not be run on untrusted projects. Rejected: the
   checks are small and the failure is silent file overwrite.
+- A general `--force` that bypasses every refusal. Rejected: it would
+  reopen the write-through-symlink exposure; the narrow option above covers
+  the legitimate case (`.venv`, `node_modules/.bin`).
 - Follow symlinks inside the project when they stay inside it. Rejected: it
   needs path resolution at every use and the common legitimate case is rare.
 - A sandbox or chroot. Rejected as disproportionate for a stdlib-only CLI.
@@ -61,7 +72,9 @@ Mitigations, each covered by a regression test:
 
 - `--add` refuses a project that contains any symlink or non-regular file
   outside `.git` (for example a `.venv` or `node_modules/.bin`), and any file
-  over 16 MiB. Run it on a clean checkout, or add the module by hand.
+  over 16 MiB, unless `--skip-unsafe-entries` is given. With the option those
+  entries are not patched, so a module whose slot marker lives in one of
+  them is refused.
 - A manifest written before this change is accepted only if it has
   `schema` 1, as the installer always wrote.
 - New repositories have no `.git/hooks` directory.
@@ -83,7 +96,7 @@ Accepted residuals:
 
 ## Verification
 
-- `python3 -I -m unittest discover -s tests` passes (71 tests), including
+- `python3 -I -m unittest discover -s tests` passes (76 tests), including
   regression tests that failed before each fix.
 - Two independent `security-reviewer` passes with scratch experiments; the
   second tried to bypass the first round's fixes and found five reachable

@@ -179,21 +179,46 @@ def collect_tree(source_dir):
     return files
 
 
-def scan_project(project):
+def scan_project(project, skipped=None):
     """Map relative POSIX path -> bytes for an existing project.
 
-    Refuses symlinks and non-regular files anywhere outside `.git`.
+    Refuses symlinks, special files, and oversized files anywhere outside
+    `.git`. When `skipped` is a list they are instead recorded there as
+    (relative path, reason) and left unread; a skipped entry is never patched
+    or written through, because it is not in the returned map.
     """
     files = {}
+
+    def unsafe(full, reason):
+        rel = os.path.relpath(full, project).replace(os.sep, "/")
+        if skipped is None:
+            raise InstallError(
+                "%s in project: %s (use --skip-unsafe-entries to skip such entries)" % (reason, full)
+            )
+        skipped.append((rel, reason))
+
     for dirpath, dirnames, filenames in os.walk(project):
         dirnames[:] = [d for d in dirnames if d != ".git"]
-        for entry in dirnames:
-            if os.path.islink(os.path.join(dirpath, entry)):
-                raise InstallError("symlink not allowed in project: %s" % os.path.join(dirpath, entry))
+        for entry in list(dirnames):
+            full = os.path.join(dirpath, entry)
+            if os.path.islink(full):
+                dirnames.remove(entry)
+                unsafe(full, "symlink not allowed")
         for filename in filenames:
             full = os.path.join(dirpath, filename)
             rel = os.path.relpath(full, project).replace(os.sep, "/")
-            files[rel] = read_regular(full)
+            try:
+                info = os.lstat(full)
+            except OSError as exc:
+                raise InstallError("cannot read %s: %s" % (full, exc.strerror or exc))
+            if stat.S_ISLNK(info.st_mode):
+                unsafe(full, "symlink not allowed")
+            elif not stat.S_ISREG(info.st_mode):
+                unsafe(full, "not a regular file")
+            elif info.st_size > MAX_FILE_BYTES:
+                unsafe(full, "file too large (limit %d bytes)" % MAX_FILE_BYTES)
+            else:
+                files[rel] = read_regular(full)
     return files
 
 
@@ -659,7 +684,12 @@ def cmd_add(args, out):
             writes[rel] = data
 
     # Fragments: patch every project text file, including newly written ones.
-    existing = scan_project(project)
+    skipped = [] if args.skip_unsafe_entries else None
+    existing = scan_project(project, skipped)
+    if skipped:
+        out("Skipped (not read, patched, or written through):")
+        for rel, reason in sorted(skipped):
+            out("  %s (%s)" % (rel, reason))
     existing.update(writes)
     fragments = {name: modules[name]["slots"] for name in wanted}
     patched = dict()
@@ -712,12 +742,19 @@ def build_parser():
     parser.add_argument("--list", action="store_true", help="list available modules")
     parser.add_argument("--add", nargs="+", metavar="MODULE", help="add modules to an existing project")
     parser.add_argument("--dir", default=".", help="project directory for --add (default: .)")
+    parser.add_argument(
+        "--skip-unsafe-entries", action="store_true",
+        help="with --add: skip (and list) symlinks, special files, and oversized files "
+             "instead of refusing; skipped entries are never read, patched, or written through",
+    )
     return parser
 
 
 def main(argv=None, out=print):
     args = build_parser().parse_args(argv)
     try:
+        if args.skip_unsafe_entries and not args.add:
+            raise InstallError("--skip-unsafe-entries applies to --add only")
         if args.list:
             return cmd_list(args, out)
         if args.add:

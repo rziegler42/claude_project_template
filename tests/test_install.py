@@ -761,6 +761,95 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("inside the template", result.stderr)
 
+    # -- --skip-unsafe-entries (plan Increment D) -------------------------
+
+    SKIP = "--skip-unsafe-entries"
+
+    def messy_project(self):
+        """A project with entries --add normally refuses; returns the outside dir."""
+        self.new("")
+        project, outside = self.target(), self.outside_dir()
+        secret = os.path.join(outside, "secret.txt")
+        with open(secret, "w") as handle:
+            handle.write("TOPSECRET\n")
+        os.makedirs(os.path.join(project, ".venv", "bin"))
+        os.symlink(secret, os.path.join(project, ".venv", "bin", "python"))
+        os.symlink(outside, os.path.join(project, "shared"))
+        os.symlink(secret, os.path.join(project, "notes-link.txt"))
+        os.mkfifo(os.path.join(project, "pipe"))
+        with open(os.path.join(project, "big.bin"), "wb") as handle:
+            handle.truncate(install.MAX_FILE_BYTES + 1)
+        return outside
+
+    def test_skip_option_extends_a_project_with_unsafe_entries(self):
+        outside = self.messy_project()
+        code, out, err = run(["--add", "cad", "--dir", self.target()])
+        self.assertEqual(code, 2, out)
+        code, out, err = run(["--add", "cad", self.SKIP, "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        for name in (".venv/bin/python", "shared", "notes-link.txt", "pipe", "big.bin"):
+            self.assertIn(name, out)
+        self.assertIn("Skipped", out)
+        self.assertTrue(os.path.exists(os.path.join(self.target(), "docs", "cad.md")))
+        with open(os.path.join(self.target(), "AGENTS.md")) as handle:
+            self.assertIn("BEGIN module:cad", handle.read())
+        self.assertEqual(sorted(os.listdir(outside)), ["secret.txt"])
+        with open(os.path.join(outside, "secret.txt")) as handle:
+            self.assertEqual(handle.read(), "TOPSECRET\n")
+
+    def test_skip_option_still_refuses_a_symlinked_file_that_needs_patching(self):
+        self.new("")
+        outside = self.outside_dir()
+        victim = os.path.join(outside, "agents.md")
+        with open(victim, "w") as handle:
+            handle.write("mine\n<!-- @module-slot: agents-guidance -->\n")
+        link = os.path.join(self.target(), "AGENTS.md")
+        os.replace(link, os.path.join(outside, "AGENTS.orig"))  # keep the marker out of the project
+        os.symlink(victim, link)
+        code, out, err = run(["--add", "cad", self.SKIP, "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertIn("no matching slot marker", err)
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), "mine\n<!-- @module-slot: agents-guidance -->\n")
+        self.assertFalse(os.path.exists(os.path.join(self.target(), "docs", "cad.md")))
+
+    def test_skip_option_still_refuses_writes_through_symlinks(self):
+        self.new("")
+        outside = self.outside_dir()
+        os.symlink(outside, os.path.join(self.target(), ".claude"))
+        code, out, err = run(["--add", "claude", self.SKIP, "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertEqual(os.listdir(outside), [])
+        self.new("", name="q")
+        os.makedirs(os.path.join(self.target("q"), "docs"), exist_ok=True)
+        existing = os.path.join(self.target("q"), "docs", "cad.md")
+        victim = os.path.join(outside, "cad.md")
+        with open(victim, "w") as handle:
+            handle.write("outside\n")
+        os.symlink(victim, existing)
+        code, out, err = run(["--add", "cad", self.SKIP, "--dir", self.target("q")])
+        self.assertEqual(code, 2)
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), "outside\n")
+
+    def test_skip_option_does_not_relax_project_or_manifest_checks(self):
+        self.new("")
+        link = os.path.join(self.work, "link")
+        os.symlink(self.target(), link)
+        code, out, err = run(["--add", "cad", self.SKIP, "--dir", link])
+        self.assertEqual(code, 2)
+        self.new("", name="m")
+        with open(os.path.join(self.target("m"), ".template-manifest"), "w") as handle:
+            handle.write("[]")
+        code, out, err = run(["--add", "cad", self.SKIP, "--dir", self.target("m")])
+        self.assertEqual(code, 2)
+
+    def test_skip_option_is_rejected_for_a_new_project(self):
+        code, out, err = self.new("", extra=[self.SKIP])
+        self.assertEqual(code, 2)
+        self.assertIn("--add", err)
+        self.assertFalse(os.path.exists(self.target()))
+
     def test_interrupt_is_a_quiet_exit(self):
         def interrupted(args, out):
             raise KeyboardInterrupt
