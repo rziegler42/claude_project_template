@@ -1,45 +1,8 @@
-# Architecture decisions
+# Template repository decisions
 
-Record durable design choices here as Architecture Decision Records (ADRs).
-ADRs explain why a decision was made; current architecture documents describe
-the resulting system.
-
-## Status and lifecycle
-
-- **Proposed** — under review; not yet a project decision.
-- **Accepted** — explicitly approved design decision. Implementation may
-  follow in a separate plan.
-- **Rejected** — considered but explicitly not adopted.
-- **Superseded** — replaced by a newer ADR, which links back to this record.
-
-Do not rewrite an accepted ADR to change a decision. Create a new ADR that
-supersedes it. Record implementation evidence in the ADR's verification section
-and in the associated implementation plan.
-
-## Naming and format
-
-- Use the next unused four-digit number: `0001-short-title.md`.
-- Do not reuse, renumber, or fill gaps in ADR numbers.
-- Keep each ADR concise: context, decision, alternatives, consequences,
-  verification, and related files and decisions.
-
-```markdown
-# NNNN: Decision title
-
-Status: Proposed | Accepted | Rejected | Superseded by ADR NNNN
-Date: YYYY-MM-DD
-
-## Context
-## Decision
-## Alternatives considered
-## Consequences
-## Verification
-## Related files and decisions
-```
-
-## Index
-
-List every ADR, including rejected and superseded records.
+Architecture decisions about this template repository itself. They follow the
+lifecycle and format in `base/docs/decisions/README.md`.
 
 | ADR | Title | Status |
 |---|---|---|
+| [0001](0001-module-and-slot-architecture.md) | Module and slot architecture for the project template | Accepted |

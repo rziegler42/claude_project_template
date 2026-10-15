@@ -1,10 +1,10 @@
 # CAD workflow
 
 This document defines the repository-specific CAD contract and is written
-for any contributor or tool. FreeCAD 1.1 Python, MCP execution, and
-workbench/API specifics live in the user-level `freecad-scripts` skill (see
-`AGENTS.md`). Project requirements recorded here take precedence when they
-are more specific.
+for any contributor or tool. Tool-specific conventions appear in the sections
+added by the project's CAD tool module, and API detail lives in user-level
+tool guidance when it is configured. Project requirements recorded here take
+precedence when they are more specific.
 
 ## Project configuration
 
@@ -13,10 +13,9 @@ Fill in these values when adopting the template.
 | Topic | Project convention |
 |---|---|
 | CAD application and version | `REPLACE_WITH_CAD_APPLICATION_AND_VERSION` |
-| Primary workbenches | `REPLACE_WITH_WORKBENCHES` |
 | Units | `REPLACE_WITH_UNITS` |
-| Parameter source and naming | `REPLACE_WITH_VARSET_OR_OTHER_PARAMETER_SOURCE_AND_NAMING_CONVENTION` |
-| Part and assembly structure | `REPLACE_WITH_BODY_AND_ASSEMBLY_CONVENTION` |
+| Parameter source and naming | `REPLACE_WITH_PARAMETER_SOURCE_AND_NAMING_CONVENTION` |
+| Part and assembly structure | `REPLACE_WITH_PART_AND_ASSEMBLY_CONVENTION` |
 | Model sources | `REPLACE_WITH_SOURCE_DIRECTORY` |
 | Reference inputs and scale source | `REPLACE_WITH_REFERENCE_MESH_OR_IMAGE_DIRECTORY_AND_SCALE_SOURCE_OR_NOT_APPLICABLE` |
 | Automation scripts or macros | `REPLACE_WITH_SCRIPT_DIRECTORY_OR_NOT_APPLICABLE` |
@@ -28,6 +27,8 @@ Fill in these values when adopting the template.
 Record add-on versions: add-on Python APIs are unversioned and can change when
 the add-on updates, so record the version the project was verified against.
 
+<!-- @module-slot: cad-tool-config -->
+
 ## Source of truth and repository layout
 
 - Editable, parametric model sources are authoritative. Do not treat meshes,
@@ -38,31 +39,32 @@ the add-on updates, so record the version the project was verified against.
 - Record the units, coordinate convention, datum/origin convention, and any
   manufacturing assumptions in the model or its adjacent documentation.
 - Prefer parameterized dimensions and named constraints over unexplained
-  literal values. If the project uses FreeCAD `App::VarSet`, use its documented
-  naming convention consistently.
-- Treat `.FCStd` files as binary. Keep associated scripts and plain-text
-  parameter or design notes reviewable in version control; do not rely on a
-  binary diff to explain an engineering change. Models can be several
-  megabytes, so state in the README or an ADR whether `.FCStd` files are
-  committed directly or stored another way (for example Git LFS).
-- FreeCAD writes timestamped backups next to the model
-  (`name.YYYYMMDD-HHMMSS.FCBak`). They are local recovery files: do not commit
-  them, and add `*.FCBak` to the project's `.gitignore` when FreeCAD is used.
+  literal values. Use the project's documented parameter naming convention
+  consistently.
+- Keep associated scripts and plain-text parameter or design notes reviewable
+  in version control; do not rely on a binary diff of a model file to explain
+  an engineering change. Models can be several megabytes, so state in the
+  README or an ADR whether model files are committed directly or stored
+  another way (for example Git LFS).
+- Tools may write timestamped backup or recovery files next to the model.
+  They are local recovery files: do not commit them, and add the tool's backup
+  pattern to the project's `.gitignore`.
 
 ## Parametric conventions
 
-- Keep dimensions in one parameter source (for FreeCAD, an `App::VarSet`) and
-  drive sketch constraints, feature lengths, and joint offsets from it with
-  expressions, rather than typing literal numbers into features. Record the
-  object name and property naming convention in the configuration table.
-- Name driven sketch constraints descriptively. Names that match unit symbols
-  (`h`, `m`, `s`, `l`, `t`, `g`, `in`, `mm`, `N`, `V`) fail to parse in
-  FreeCAD expressions.
+- Keep dimensions in one parameter source and drive sketch constraints,
+  feature lengths, and joint offsets from it with expressions, rather than
+  typing literal numbers into features. Record the object name and property
+  naming convention in the configuration table.
+- Name driven sketch constraints descriptively, avoiding names that the
+  tool's expression language can confuse with unit symbols.
 - Build each part as its own body, with features created inside it, and combine
   bodies in an assembly or with explicit boolean/binder features.
 - Sketches should be fully constrained unless a free degree of freedom is
   intentional and noted; an under-constrained sketch can change shape when a
   parameter changes.
+
+<!-- @module-slot: cad-tool-parametric -->
 
 ## Reverse-engineered and image-derived models
 
@@ -100,9 +102,9 @@ or a drawing.
 
 1. Read this file, the relevant model or script, and the governing drawing,
    requirement, or ADR before changing geometry.
-2. For FreeCAD scripting or MCP work, follow the `freecad-scripts` skill;
-   use headless execution for pure geometry when practical and the live GUI
-   only when GUI state is required.
+2. For scripted or tool-driven modelling, follow the tool's section below and
+   any user-level tool guidance; use headless execution for pure geometry
+   when practical and the live GUI only when GUI state is required.
 3. Recompute the document and resolve errors before saving or exporting.
    A feature that reports an up-to-date state can still be wrong; check the
    result, not only the state.
@@ -121,6 +123,8 @@ or a drawing.
    explicitly rather than relying on defaults, and record it.
 7. Record assumptions, approximations, measured results, and any intentionally
    unverified condition in the change description, design note, or ADR.
+
+<!-- @module-slot: cad-tool-verification -->
 
 ## Design decisions
 
@@ -142,6 +146,8 @@ documentation instead of duplicating its decision.
       solid, volume and bounding box match, tessellation settings recorded).
 - [ ] For models derived from a mesh or image: scale source, measured versus
       assumed dimensions, and the deviation or comparison result are recorded.
-- [ ] Backup files (`*.FCBak`) and temporary mesh repairs are not committed.
+- [ ] Backup files and temporary mesh repairs are not committed.
 - [ ] Assumptions, approximations, and relevant measurement results are recorded.
 - [ ] A durable engineering convention has an ADR when needed.
+
+<!-- @module-slot: cad-tool-checklist -->

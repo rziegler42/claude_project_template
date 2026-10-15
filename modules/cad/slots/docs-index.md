@@ -1,0 +1,1 @@
+- `cad.md` — CAD source, export, and geometry-verification conventions

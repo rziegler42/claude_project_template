@@ -1,0 +1,5 @@
+{
+  "description": "Tool-neutral CAD workflow (docs/cad.md); CAD tool modules such as cad-freecad fill its tool slots",
+  "requires": [],
+  "order": 30
+}

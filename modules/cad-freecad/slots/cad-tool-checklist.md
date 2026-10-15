@@ -1,0 +1,1 @@
+- [ ] FreeCAD backup files (`*.FCBak`) are not committed.

@@ -1,0 +1,5 @@
+{
+  "description": "FreeCAD 1.1 conventions for the CAD workflow: VarSet, .FCStd storage, backups, headless checks",
+  "requires": ["cad"],
+  "order": 31
+}

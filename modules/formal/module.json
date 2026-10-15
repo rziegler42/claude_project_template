@@ -1,0 +1,5 @@
+{
+  "description": "Tool-neutral formal verification guidance (properties, assumptions, covers, inconclusive results)",
+  "requires": [],
+  "order": 20
+}
