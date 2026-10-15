@@ -11,3 +11,4 @@ and formats in `base/docs/plans/README.md`; `next.md` is the sole active plan.
 | [0002](0002-runner-stub-hints-prompts.md) | Completed | Runner contract stub in the `claude` module, module post-install hints, prompts validated before asking |
 | [0003](0003-installer-security-review.md) | Completed | Two adversarial security reviews of `install.py`; hardened reads and writes, scrubbed git environment, `--skip-unsafe-entries`; ADR 0002 |
 | [0004](0004-plan-review-module.md) | Completed | Tool-neutral `plan-review` module: bounded read-only plan review policy and a Second opinion receipt in plans and archives |
+| [0005](0005-codex-module.md) | Completed | Harness-marked `codex` module on top of `plan-review`: concrete Codex plan-review guidance and receipt mapping |
