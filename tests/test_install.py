@@ -890,6 +890,51 @@ class InstallerTest(unittest.TestCase):
         for path in fresh:
             self.assertEqual(added[path], fresh[path], path)
 
+    # -- codex module (plan 0005, Increment A) ----------------------------
+
+    def test_codex_pulls_plan_review_and_inserts_guidance(self):
+        code, out, err = self.new("codex")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Modules: plan-review, codex", out)
+        self.assertIn("Required modules added: plan-review", out)
+        tree = read_tree(self.target())
+        agents = tree["AGENTS.md"]
+        self.assertIn("BEGIN module:plan-review slot:agents-guidance", agents)
+        self.assertIn("BEGIN module:codex slot:agents-guidance", agents)
+        for phrase in ("have Codex review the plan", "/second-opinion", "ask-codex review-plan",
+                       "3 rounds by default", "never more than 5", "applied or rejected",
+                       "extend", "reset", "archive", "prune", "untracked", "OpenAI"):
+            self.assertIn(phrase, agents)
+        plan = tree["docs/plans/next.md"]
+        self.assertIn("BEGIN module:codex slot:plan-review", plan)
+        self.assertIn("ask-codex archive", plan)
+        self.assertLess(plan.index("module:plan-review slot:plan-review"),
+                        plan.index("module:codex slot:plan-review"))
+        self.assertEqual(out.count("  codex: "), 1)
+        self.assertEqual(out.count("  plan-review: "), 1)
+
+    def test_codex_text_absent_without_the_module(self):
+        self.new("plan-review")
+        for path, text in read_tree(self.target()).items():
+            self.assertNotIn("ask-codex", text, path)
+            self.assertNotIn("module:codex", text, path)
+
+    def test_add_codex_matches_fresh_install(self):
+        self.new("plan-review")
+        code, out, err = run(["--add", "codex", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.new("codex", name="fresh", extra=["--name", "demo"])
+        added, fresh = read_tree(self.target()), read_tree(self.target("fresh"))
+        added.pop(".template-manifest"), fresh.pop(".template-manifest")
+        self.assertEqual(added.keys(), fresh.keys())
+        for path in fresh:
+            self.assertEqual(added[path], fresh[path], path)
+
+    def test_codex_is_a_harness_module_and_listed_that_way(self):
+        self.assertTrue(install.load_modules()["codex"]["harness"])
+        code, out, err = run(["--list"])
+        self.assertIn("codex (harness; requires plan-review)", out)
+
     def test_interrupt_is_a_quiet_exit(self):
         def interrupted(args, out):
             raise KeyboardInterrupt

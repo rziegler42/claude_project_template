@@ -91,6 +91,7 @@ the trust model, mitigations, and accepted residuals. In practice:
 | `claude` | Claude Code entry point (`CLAUDE.md` importing `AGENTS.md`), local-settings ignore line, and a `.claude/remote-runner.toml` stub with the project id and no active profile (harness) |
 | `graphify` | Graphify discovery/impact policy, `.graphifyignore`, plan evidence section |
 | `plan-review` | Tool-neutral policy for an independent, bounded, read-only review of the plan, and a Second opinion receipt in the plan and its archive |
+| `codex` | Codex plan review through the `ask-codex` helper and `second-opinion` skill: request, limits, owner-only commands, state, and mapping to the plan's receipt; requires `plan-review` (harness) |
 | `formal` | Tool-neutral formal verification guidance |
 | `cad` | Tool-neutral CAD workflow (`docs/cad.md`) |
 | `cad-freecad` | FreeCAD conventions; requires `cad` |
@@ -104,7 +105,9 @@ the trust model, mitigations, and accepted residuals. In practice:
    a slot with no marker anywhere is an error.
 4. Keep committed content neutral: name capabilities and policy, never a
    private helper or skill. Only modules marked `"harness": true` may be
-   harness-specific.
+   harness-specific or name a Claude-owned helper or skill; a module bound to
+   one tool, such as `codex`, is marked this way and requires the neutral
+   module that holds the policy.
 5. Run the tests; add a case if the module introduces new behavior.
 
 Slots available in `base/` (a fragment's file name is the slot name):
