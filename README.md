@@ -43,7 +43,10 @@ cd ../my-project
 
 `--add` works only on projects created by the installer (it needs
 `.template-manifest`). It refuses to overwrite a file that differs, is
-idempotent, and never commits. Name placeholders in a module's files are
+idempotent, and never commits. It refuses a project that contains symlinks
+(including the project directory itself, `.template-manifest`, and any path it
+would write through) or non-regular files, a malformed manifest, and any module
+file under `.git/`. Name placeholders in a module's files are
 filled from the project directory name (or `--name`).
 
 ## Layout

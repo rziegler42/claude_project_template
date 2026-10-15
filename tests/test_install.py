@@ -460,6 +460,223 @@ class InstallerTest(unittest.TestCase):
         with open(os.path.join(self.target(), ".template-manifest")) as handle:
             self.assertEqual(json.load(handle)["modules"], ["cad", "cad-freecad"])
 
+    # -- hardening (plan: security review, Increment B) ------------------
+
+    def outside_dir(self, name="outside"):
+        path = os.path.join(self.work, name)
+        os.makedirs(path)
+        return path
+
+    def test_add_refuses_symlinked_directory(self):
+        self.new("")
+        outside = self.outside_dir()
+        os.symlink(outside, os.path.join(self.target(), ".claude"))
+        code, out, err = run(["--add", "claude", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+        self.assertEqual(os.listdir(outside), [])
+
+    def test_add_refuses_symlinked_file_and_leaves_outside_untouched(self):
+        self.new("")
+        outside = self.outside_dir()
+        victim = os.path.join(outside, "agents.md")
+        with open(victim, "w") as handle:
+            handle.write("mine\n<!-- @module-slot: agents-guidance -->\n")
+        link = os.path.join(self.target(), "AGENTS.md")
+        os.replace(link, link + ".orig")
+        os.symlink(victim, link)
+        code, out, err = run(["--add", "cad", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), "mine\n<!-- @module-slot: agents-guidance -->\n")
+
+    def test_add_refuses_symlinked_manifest(self):
+        self.new("")
+        outside = self.outside_dir()
+        victim = os.path.join(outside, "manifest")
+        manifest = os.path.join(self.target(), ".template-manifest")
+        os.replace(manifest, victim)
+        os.symlink(victim, manifest)
+        with open(victim) as handle:
+            before = handle.read()
+        code, out, err = run(["--add", "cad", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        with open(victim) as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_add_refuses_symlinked_project_directory(self):
+        self.new("")
+        link = os.path.join(self.work, "link")
+        os.symlink(self.target(), link)
+        code, out, err = run(["--add", "cad", "--dir", link])
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+
+    def cli(self, argv, timeout=10):
+        try:
+            return subprocess.run(
+                [sys.executable, "-I", os.path.join(ROOT, "install.py")] + argv,
+                capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("installer hung on a special file")
+
+    def test_add_refuses_special_files_without_hanging(self):
+        self.new("")
+        os.mkfifo(os.path.join(self.target(), "docs", "pipe"))
+        result = self.cli(["--add", "cad", "--dir", self.target()])
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("regular", result.stderr)
+
+    def test_module_source_special_file_is_refused_without_hanging(self):
+        import threading
+        root = self.fake_modules({"pipey": {"description": "x"}})
+        os.makedirs(os.path.join(root, "pipey", "files"))
+        os.mkfifo(os.path.join(root, "pipey", "files", "pipe"))
+        result = []
+
+        def attempt():
+            try:
+                install.assemble(["pipey"], install.load_modules(root))
+                result.append(None)
+            except install.InstallError as exc:
+                result.append(exc)
+
+        worker = threading.Thread(target=attempt, daemon=True)
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive(), "reading a module FIFO hung")
+        self.assertIsInstance(result[0], install.InstallError)
+
+    def test_module_files_may_not_target_git_metadata(self):
+        for rel in (".git/hooks/pre-commit", ".GIT/config", "docs/.git/x", ".Git"):
+            with self.subTest(path=rel):
+                root = self.fake_modules({"evil": {"description": "x"}})
+                full = os.path.join(root, "evil", "files", *rel.split("/"))
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as handle:
+                    handle.write("#!/bin/sh\necho pwn\n")
+                code, out, err = self.new("evil", name="p")
+                self.assertEqual(code, 2, out)
+                self.assertIn("git metadata", err)
+                self.assertFalse(os.path.exists(self.target("p")))
+                code, out, err = self.new("", name="q")
+                self.assertEqual(code, 0, err)
+                before = read_tree(self.target("q"))
+                code, out, err = run(["--add", "evil", "--dir", self.target("q")])
+                self.assertEqual(code, 2)
+                self.assertEqual(before, read_tree(self.target("q")))
+                self.assertFalse(
+                    os.path.exists(os.path.join(self.target("q"), ".git", "hooks", "pre-commit")))
+                import shutil
+                shutil.rmtree(self.target("q"))
+                shutil.rmtree(root)
+
+    def test_ambient_git_dir_does_not_redirect_writes(self):
+        evil = os.path.join(self.work, "evil")
+        subprocess.run(["git", "init", "-q", evil], check=True)
+        os.environ["GIT_DIR"] = os.path.join(evil, ".git")
+        try:
+            code, out, err = self.new("")
+        finally:
+            os.environ.pop("GIT_DIR")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.git("config", "--local", "--get", "user.email").stdout.strip(),
+                         "tester@users.noreply.example.invalid")
+        stray = subprocess.run(["git", "-C", evil, "config", "--local", "--get", "user.email"],
+                               capture_output=True, text=True)
+        self.assertNotEqual(stray.returncode, 0, stray.stdout)
+
+    def append_global_config(self, text):
+        with open(os.environ["GIT_CONFIG_GLOBAL"], "a") as handle:
+            handle.write(text)
+
+    def test_git_status_in_template_does_not_run_fsmonitor(self):
+        marker = os.path.join(self.work, "fsmonitor-ran")
+        script = os.path.join(self.work, "fsmon.sh")
+        with open(script, "w") as handle:
+            handle.write("#!/bin/sh\ntouch '%s'\nprintf '\\0'\n" % marker)
+        os.chmod(script, 0o755)
+        self.append_global_config("[core]\n\tfsmonitor = %s\n" % script)
+        code, out, err = self.new("", extra=["--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(marker), "fsmonitor program was executed")
+
+    def test_global_template_dir_hooks_are_not_copied(self):
+        hooks = os.path.join(self.work, "tmpl", "hooks")
+        os.makedirs(hooks)
+        with open(os.path.join(hooks, "pre-commit"), "w") as handle:
+            handle.write("#!/bin/sh\necho pwn\n")
+        self.append_global_config("[init]\n\ttemplateDir = %s\n" % os.path.join(self.work, "tmpl"))
+        code, out, err = self.new("")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(os.path.join(self.target(), ".git", "hooks", "pre-commit")))
+
+    def test_malformed_manifests_are_clean_refusals(self):
+        deep = "[" * 100000 + "]" * 100000
+        cases = ("[]", "null", "5", '"x"', "", "{", '{"modules": null}', '{"modules": "claude"}',
+                 '{"modules": {"claude": 1}}', '{"modules": [["a"]]}', '{"modules": [5]}',
+                 '{"modules": ["Bad Name"]}', '{"modules": [], "schema": 99}',
+                 '{"modules": []}', deep)
+        for raw in cases:
+            with self.subTest(manifest=raw[:40]):
+                self.new("", name="m")
+                path = os.path.join(self.target("m"), ".template-manifest")
+                with open(path, "w") as handle:
+                    handle.write(raw)
+                before = read_tree(self.target("m"))
+                code, out, err = run(["--add", "cad", "--dir", self.target("m")])
+                self.assertEqual(code, 2, err)
+                self.assertIn("error:", err)
+                self.assertEqual(before, read_tree(self.target("m")))
+                import shutil
+                shutil.rmtree(self.target("m"))
+
+    def test_case_variant_of_template_path_is_refused(self):
+        variant = ROOT.swapcase()
+        if not os.path.isdir(variant):
+            self.skipTest("case-sensitive filesystem")
+        # --dry-run: a regression must fail the test without littering the repo.
+        code, out, err = run([os.path.join(variant, "inside-test"), "--dry-run"])
+        self.assertEqual(code, 2, out)
+        self.assertIn("inside the template", err)
+
+    def test_control_characters_in_names_are_refused(self):
+        for value in ("a\rb", "\x1b[31mred", "a\nb", "a\x00b"):
+            with self.subTest(name=value):
+                code, out, err = self.new("", name="p", extra=["--name=" + value])
+                self.assertEqual(code, 2, out)
+                self.assertFalse(os.path.exists(self.target("p")))
+                code, out, err = run([self.target("p"), "--git-name=" + value, "--git-email",
+                                      "t@users.noreply.example.invalid"])
+                self.assertEqual(code, 2, out)
+                self.assertFalse(os.path.exists(self.target("p")))
+        code, out, err = run([self.target("p"), "--git-name", "T",
+                              "--git-email", "t\x1b[0m@users.noreply.example.invalid"])
+        self.assertEqual(code, 2)
+
+    def test_add_name_override_refuses_control_characters(self):
+        self.new("", name="q")
+        before = read_tree(self.target("q"))
+        code, out, err = run(["--add", "claude", "--dir", self.target("q"), "--name=a\x1b[1m"])
+        self.assertEqual(code, 2)
+        self.assertEqual(before, read_tree(self.target("q")))
+
+    def test_case_colliding_and_reserved_module_files_are_refused(self):
+        for rel in ("docs/README.MD", "agents.md", ".Template-Manifest", ".template-manifest"):
+            with self.subTest(path=rel):
+                root = self.fake_modules({"clash": {"description": "x"}})
+                full = os.path.join(root, "clash", "files", *rel.split("/"))
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as handle:
+                    handle.write("x\n")
+                code, out, err = self.new("clash", name="p")
+                self.assertEqual(code, 2, out)
+                self.assertFalse(os.path.exists(self.target("p")))
+                import shutil
+                shutil.rmtree(root)
+
     def test_interrupt_is_a_quiet_exit(self):
         def interrupted(args, out):
             raise KeyboardInterrupt

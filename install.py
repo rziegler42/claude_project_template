@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
@@ -30,6 +31,8 @@ PLACEHOLDER = "REPLACE_WITH_"
 NAME_PLACEHOLDER = b"REPLACE_WITH_PROJECT_NAME"
 ID_PLACEHOLDER = b"REPLACE_WITH_PROJECT_ID"
 HINT_MAX = 200
+MAX_FILE_BYTES = 16 * 1024 * 1024
+MAX_MANIFEST_BYTES = 1024 * 1024
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
@@ -116,8 +119,35 @@ def is_text(data):
     return b"\0" not in data
 
 
+def read_regular(path, limit=MAX_FILE_BYTES):
+    """Read a regular file that is not, and does not go through, a symlink."""
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise InstallError("cannot read %s: %s" % (path, exc.strerror or exc))
+    if stat.S_ISLNK(info.st_mode):
+        raise InstallError("symlink not allowed: %s" % path)
+    if not stat.S_ISREG(info.st_mode):
+        raise InstallError("not a regular file: %s" % path)
+    if info.st_size > limit:
+        raise InstallError("file too large (%d bytes, limit %d): %s" % (info.st_size, limit, path))
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise InstallError("cannot read %s: %s" % (path, exc.strerror or exc))
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read()
+
+
+def reject_git_metadata(rel):
+    if any(part.casefold() == ".git" for part in rel.split("/")):
+        raise InstallError("path may not touch git metadata: %s" % rel)
+
+
 def collect_tree(source_dir):
-    """Map relative POSIX path -> bytes; reject symlinks and traversal."""
+    """Map relative POSIX path -> bytes; regular files only, no symlinks,
+    no traversal, no git metadata."""
     files = {}
     if not os.path.isdir(source_dir):
         return files
@@ -130,8 +160,28 @@ def collect_tree(source_dir):
             rel = os.path.relpath(full, source_dir).replace(os.sep, "/")
             if rel.startswith("../") or rel.startswith("/"):
                 raise InstallError("unsafe template path: %s" % rel)
-            with open(full, "rb") as handle:
-                files[rel] = handle.read()
+            reject_git_metadata(rel)
+            if rel.casefold() == MANIFEST.casefold():
+                raise InstallError("path is reserved for the installer: %s" % rel)
+            files[rel] = read_regular(full)
+    return files
+
+
+def scan_project(project):
+    """Map relative POSIX path -> bytes for an existing project.
+
+    Refuses symlinks and non-regular files anywhere outside `.git`.
+    """
+    files = {}
+    for dirpath, dirnames, filenames in os.walk(project):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        for entry in dirnames:
+            if os.path.islink(os.path.join(dirpath, entry)):
+                raise InstallError("symlink not allowed in project: %s" % os.path.join(dirpath, entry))
+        for filename in filenames:
+            full = os.path.join(dirpath, filename)
+            rel = os.path.relpath(full, project).replace(os.sep, "/")
+            files[rel] = read_regular(full)
     return files
 
 
@@ -201,12 +251,18 @@ def assemble(module_names, modules):
     """Build the output tree {relpath: bytes} for base plus the given modules."""
     tree = collect_tree(BASE_DIR)
     owners = {path: "base" for path in tree}
+    folded = {path.casefold(): path for path in tree}
     for name in module_names:
         for path, data in collect_tree(os.path.join(modules[name]["path"], "files")).items():
-            if path in tree:
-                raise InstallError("%s: file also provided by %s" % (path, owners[path]))
+            if path.casefold() in folded:
+                other = folded[path.casefold()]
+                raise InstallError(
+                    "%s: file also provided by %s (as %s; names are compared "
+                    "case-insensitively)" % (path, owners[other], other)
+                )
             tree[path] = data
             owners[path] = name
+            folded[path.casefold()] = path
     fragments = {name: modules[name]["slots"] for name in module_names}
     wanted = {(name, slot) for name in module_names for slot in fragments[name]}
     used = set()
@@ -233,10 +289,28 @@ def assemble(module_names, modules):
 # Git
 
 
-def git(args, cwd=None, check=True, env=None):
-    result = subprocess.run(
-        ["git"] + args, cwd=cwd, env=env, text=True, capture_output=True, check=False
-    )
+GIT_KEEP = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM")
+# Never run a configured helper program or inherit hooks/templates implicitly.
+GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+            "-c", "core.hooksPath=/dev/null"]
+
+
+def git_env():
+    """The caller's environment without ambient GIT_* repository selection."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") or k in GIT_KEEP}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def git(args, cwd=None, check=True):
+    try:
+        result = subprocess.run(
+            ["git"] + GIT_SAFE + args, cwd=cwd, env=git_env(), text=True,
+            capture_output=True, check=False,
+        )
+    except OSError as exc:
+        raise InstallError("cannot run git: %s" % exc)
     if check and result.returncode:
         raise InstallError("git %s failed: %s" % (" ".join(args), (result.stderr or result.stdout).strip()))
     return result
@@ -250,9 +324,15 @@ def template_state():
     return commit.stdout.strip(), dirty
 
 
+def require_printable(value, what):
+    if not isinstance(value, str) or not value.isprintable():
+        raise InstallError("%s must be a single line of printable characters" % what)
+    return value
+
+
 def validate_identity(name, email):
-    name = (name or "").strip()
-    email = (email or "").strip()
+    name = require_printable((name or "").strip(), "git user name")
+    email = require_printable((email or "").strip(), "git user email")
     if not name:
         raise InstallError("git user name must not be empty")
     if not re.match(r"^[^@\s]+@[^@\s]+$", email):
@@ -350,18 +430,78 @@ def check_target(target):
     real = os.path.realpath(target)
     if real == ROOT or real.startswith(ROOT + os.sep):
         raise InstallError("target must not be inside the template repository")
+    # A case variant of the template path resolves to it on a case-insensitive
+    # filesystem; compare every existing ancestor by identity.
+    probe = target
+    while True:
+        if os.path.exists(probe) and os.path.samefile(probe, ROOT):
+            raise InstallError("target must not be inside the template repository")
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
     if os.path.exists(target):
         if not os.path.isdir(target) or os.listdir(target):
             raise InstallError("target exists and is not an empty directory: %s" % target)
     return target
 
 
+def check_write_paths(root, rels):
+    """Refuse a write whose path goes through a symlink or onto a non-file."""
+    for rel in rels:
+        reject_git_metadata(rel)
+        parts = rel.split("/")
+        current = root
+        for part in parts[:-1]:
+            current = os.path.join(current, part)
+            if os.path.lexists(current) and (os.path.islink(current) or not os.path.isdir(current)):
+                raise InstallError("refusing to write through %s (symlink or not a directory)" % current)
+        final = os.path.join(current, parts[-1])
+        if os.path.lexists(final):
+            info = os.lstat(final)
+            if stat.S_ISLNK(info.st_mode):
+                raise InstallError("symlink not allowed: %s" % final)
+            if not stat.S_ISREG(info.st_mode):
+                raise InstallError("not a regular file: %s" % final)
+
+
 def write_tree(target, tree):
+    check_write_paths(target, list(tree))
     for rel, data in tree.items():
         dest = os.path.join(target, *rel.split("/"))
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, "wb") as handle:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(dest, flags, 0o666)
+        with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+
+
+def load_manifest(project):
+    if os.path.islink(project):
+        raise InstallError("project directory is a symlink: %s" % project)
+    path = os.path.join(project, MANIFEST)
+    if not os.path.lexists(path):
+        raise InstallError(
+            "%s not found: --add works only on projects created by this installer" % MANIFEST
+        )
+    raw = read_regular(path, MAX_MANIFEST_BYTES)
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise InstallError("%s is not valid JSON" % MANIFEST)
+    modules = manifest.get("modules") if isinstance(manifest, dict) else None
+    schema = manifest.get("schema") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or isinstance(schema, bool) or schema != SCHEMA
+        or not isinstance(modules, list)
+        or not all(isinstance(m, str) and NAME_RE.match(m) for m in modules)
+    ):
+        raise InstallError(
+            "%s is malformed (expected an object with schema %d and a list of module names)"
+            % (MANIFEST, SCHEMA)
+        )
+    return manifest
 
 
 def manifest_bytes(module_names, commit, dirty):
@@ -381,8 +521,9 @@ def cmd_new(args, out):
     # Everything that can fail without user input comes before any prompt.
     target = check_target(args.target)
     name = args.name or os.path.basename(target.rstrip(os.sep))
-    if not name or "\n" in name:
+    if not name:
         raise InstallError("invalid project name")
+    require_printable(name, "project name")
     if not args.with_ and interactive and not args.dry_run:
         answer = ask(
             "Modules (comma separated, blank for none; available: %s): "
@@ -413,7 +554,7 @@ def cmd_new(args, out):
 
     os.makedirs(target, exist_ok=True)
     write_tree(target, tree)
-    git(["init", "-q"], cwd=target)
+    git(["init", "-q", "--template="], cwd=target)
     git(["symbolic-ref", "HEAD", "refs/heads/main"], cwd=target)
     exclude = os.path.join(target, ".git", "info", "exclude")
     os.makedirs(os.path.dirname(exclude), exist_ok=True)
@@ -454,14 +595,8 @@ def cmd_list(args, out):
 def cmd_add(args, out):
     modules = load_modules()
     project = os.path.abspath(args.dir)
-    manifest_path = os.path.join(project, MANIFEST)
-    if not os.path.isfile(manifest_path):
-        raise InstallError(
-            "%s not found: --add works only on projects created by this installer" % MANIFEST
-        )
-    with open(manifest_path, encoding="utf-8") as handle:
-        manifest = json.load(handle)
-    installed = list(manifest.get("modules", []))
+    manifest = load_manifest(project)
+    installed = list(manifest["modules"])
     wanted = resolve(list(installed) + list(args.add), modules)
     new = [name for name in wanted if name not in installed]
     if not new:
@@ -469,29 +604,23 @@ def cmd_add(args, out):
         return 0
 
     # Module files: refuse to overwrite anything that differs.
-    project_name = args.name or os.path.basename(project.rstrip(os.sep))
+    project_name = require_printable(
+        args.name or os.path.basename(project.rstrip(os.sep)), "project name"
+    )
     writes = {}
     for name in new:
         files = collect_tree(os.path.join(modules[name]["path"], "files"))
         substitute(files, project_name)
         for rel, data in files.items():
             dest = os.path.join(project, *rel.split("/"))
-            if os.path.exists(dest):
-                with open(dest, "rb") as handle:
-                    if handle.read() != data:
-                        raise InstallError("%s exists and differs; not overwriting" % rel)
+            if os.path.lexists(dest):
+                if read_regular(dest) != data:
+                    raise InstallError("%s exists and differs; not overwriting" % rel)
                 continue
             writes[rel] = data
 
     # Fragments: patch every project text file, including newly written ones.
-    existing = {}
-    for dirpath, dirnames, filenames in os.walk(project):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
-        for filename in filenames:
-            full = os.path.join(dirpath, filename)
-            rel = os.path.relpath(full, project).replace(os.sep, "/")
-            with open(full, "rb") as handle:
-                existing[rel] = handle.read()
+    existing = scan_project(project)
     existing.update(writes)
     fragments = {name: modules[name]["slots"] for name in wanted}
     patched = dict()
