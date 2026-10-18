@@ -3,6 +3,7 @@ import io
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2086,7 +2087,7 @@ class RegistryTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.target("second")))
 
 
-class UpdateTest(unittest.TestCase):
+class ProjectCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -2153,6 +2154,8 @@ class UpdateTest(unittest.TestCase):
         with open(os.path.join(root, "demo", "slots", "agents-guidance.md"), "w") as handle:
             handle.write(text)
 
+
+class UpdateTest(ProjectCase):
     def test_unchanged_project_is_a_noop(self):
         self.assertEqual(self.new(ALL)[0], 0)
         before = tree_hash(self.target())
@@ -2406,6 +2409,307 @@ class UpdateTest(unittest.TestCase):
         code, out, err = self.update()
         self.assertEqual(code, 2)
         self.assertIn("symlink", err)
+
+
+class RemoveTest(ProjectCase):
+    def remove(self, *argv, extra=()):
+        return run(["--remove"] + list(argv) + ["--dir", self.target()] + list(extra))
+
+    def snapshot(self, with_):
+        """Create a project in its own directory and return its files minus the manifest."""
+        parent = os.path.join(self.work, "snap-" + with_.replace(",", "-"))
+        os.makedirs(parent)
+        target = os.path.join(parent, "proj")
+        code, out, err = run([target, "--with", with_, "--git-name", "Test User",
+                              "--git-email", "tester@users.noreply.example.invalid"])
+        self.assertEqual(code, 0, err)
+        tree = read_tree(target)
+        tree.pop(".template-manifest")
+        return tree
+
+    def files(self):
+        tree = read_tree(self.target())
+        return tree.pop(".template-manifest"), tree
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def store(self, **kwargs):
+        return make_store(self.work, **kwargs)
+
+    def test_remove_matches_a_project_created_without_the_module(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 0, err)
+        _, tree = self.files()
+        self.assertEqual(tree, self.snapshot("claude"))
+        self.assertEqual(self.manifest()["modules"], ["claude"])
+        self.assertFalse(os.path.lexists(self.path(".graphifyignore")))
+
+    def test_add_then_remove_restores_the_project(self):
+        self.assertEqual(self.new("claude")[0], 0)
+        before = self.files()[1]
+        self.assertEqual(run(["--add", "cad", "graphify", "--dir", self.target()])[0], 0)
+        self.assertEqual(self.remove("cad", "graphify")[0], 0)
+        self.assertEqual(self.files()[1], before)
+        self.assertFalse(os.path.lexists(self.path("docs/cad.md")))
+
+    def test_empty_directories_are_pruned_but_not_others(self):
+        self.assertEqual(self.new("claude,cad")[0], 0)
+        self.assertEqual(self.remove("claude")[0], 0)
+        self.assertFalse(os.path.lexists(self.path(".claude")))
+        self.assertTrue(os.path.isdir(self.path("docs")))
+        self.assertTrue(os.path.isdir(self.path(".git")))
+
+    def test_edited_module_file_is_kept_and_reported(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.write(".graphifyignore", "mine\n")
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 0, err)
+        self.assertIn("kept .graphifyignore", out)
+        self.assertEqual(self.read(".graphifyignore"), "mine\n")
+        self.assertNotIn("module:graphify", self.read("AGENTS.md"))
+        self.assertEqual(self.manifest()["modules"], ["claude"])
+
+    def test_dependent_module_blocks_removal(self):
+        self.assertEqual(self.new("cad-freecad")[0], 0)
+        before = tree_hash(self.target())
+        code, out, err = self.remove("cad")
+        self.assertEqual(code, 2)
+        self.assertIn("cad-freecad", err)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_naming_module_and_dependent_removes_both(self):
+        self.assertEqual(self.new("cad-freecad,claude")[0], 0)
+        self.assertEqual(self.remove("cad", "cad-freecad")[0], 0)
+        _, tree = self.files()
+        self.assertEqual(tree, self.snapshot("claude"))
+
+    def test_removing_the_dependent_alone_keeps_the_module(self):
+        self.assertEqual(self.new("cad-freecad,claude")[0], 0)
+        self.assertEqual(self.remove("cad-freecad")[0], 0)
+        _, tree = self.files()
+        self.assertEqual(tree, self.snapshot("cad,claude"))
+
+    def test_not_installed_is_an_error(self):
+        self.assertEqual(self.new("claude")[0], 0)
+        before = tree_hash(self.target())
+        for name in ("graphify", "no-such", "kb=/tmp/x", "../x"):
+            with self.subTest(name=name):
+                code, out, err = self.remove(name)
+                self.assertEqual(code, 2)
+                self.assertIn("not installed", err)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_malformed_markers_stop_the_run_with_nothing_written(self):
+        self.assertEqual(self.new("claude,graphify,formal")[0], 0)
+        lines, begin, end = UpdateTest.block_lines(self, "AGENTS.md", "graphify", "agents-guidance")
+        del lines[end]
+        self.write("AGENTS.md", "\n".join(lines))
+        before = tree_hash(self.target())
+        code, out, err = self.remove("graphify", "formal")
+        self.assertEqual(code, 2)
+        self.assertIn("AGENTS.md", err)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_unrelated_malformed_file_does_not_block_removal(self):
+        self.assertEqual(self.new("claude,graphify,plan-review")[0], 0)
+        rel = "docs/plans/README.md"
+        lines, begin, end = UpdateTest.block_lines(self, rel, "plan-review", "plans-review-note")
+        del lines[end]
+        self.write(rel, "\n".join(lines))
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.lexists(self.path(".graphifyignore")))
+
+    def test_dry_run_writes_and_deletes_nothing(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        before = tree_hash(self.target())
+        code, out, err = self.remove("graphify", extra=["--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("would delete .graphifyignore", out)
+        self.assertIn("would write AGENTS.md", out)
+        self.assertIn("Dry run", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_conflicting_modes(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        before = tree_hash(self.target())
+        for extra in (["--add", "cad"], ["--update"], ["--with", "cad"], ["--list"],
+                      ["--register", self.work], ["--unregister", "x"], [self.work + "/other"]):
+            with self.subTest(extra=extra):
+                code, out, err = run(["--remove", "graphify", "--dir", self.target()] + extra)
+                self.assertEqual(code, 2)
+        for extra in (["--add", "cad"], ["--update"]):
+            with self.subTest(order=extra):
+                code, out, err = run(extra + ["--remove", "graphify", "--dir", self.target()])
+                self.assertNotEqual(code, 0)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_not_an_installer_project(self):
+        os.makedirs(self.target())
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 2)
+        self.assertIn(".template-manifest", err)
+
+    def test_symlink_in_project_is_refused(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        os.symlink("AGENTS.md", self.path("link"))
+        before = tree_hash(self.target())
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 2)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_parent_swapped_for_a_symlink_after_the_check_is_refused(self):
+        self.assertEqual(self.new("claude,cad")[0], 0)
+        outside = os.path.join(self.work, "outside")
+        os.makedirs(outside)
+        victim = os.path.join(outside, "cad.md")
+        shutil.copy(self.path("docs/cad.md"), victim)
+        original = install.check_write_paths
+
+        def swapped(root, rels):
+            original(root, rels)
+            os.rename(self.path("docs"), self.path("docs.moved"))
+            os.symlink(outside, self.path("docs"))
+
+        install.check_write_paths = swapped
+        self.addCleanup(setattr, install, "check_write_paths", original)
+        code, out, err = self.remove("cad")
+        self.assertEqual(code, 2)
+        self.assertTrue(os.path.exists(victim))
+
+    def test_without_safe_deletion_files_are_kept(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        saved = install.can_delete_safely
+        install.can_delete_safely = lambda: False
+        self.addCleanup(setattr, install, "can_delete_safely", saved)
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 0, err)
+        self.assertIn("kept .graphifyignore", out)
+        self.assertTrue(os.path.exists(self.path(".graphifyignore")))
+        self.assertNotIn("module:graphify", self.read("AGENTS.md"))
+
+    def test_module_no_longer_provided_keeps_files(self):
+        root = os.path.join(self.work, "fake-modules")
+        shutil.copytree(os.path.join(install.MODULES_DIR), root)
+        saved = install.MODULES_DIR
+        install.MODULES_DIR = root
+        self.addCleanup(setattr, install, "MODULES_DIR", saved)
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        shutil.rmtree(os.path.join(root, "graphify"))
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 0, err)
+        self.assertIn("no longer provided", out)
+        self.assertTrue(os.path.exists(self.path(".graphifyignore")))
+        self.assertNotIn("module:graphify", self.read("AGENTS.md"))
+        self.assertEqual(self.manifest()["modules"], ["claude"])
+
+    def test_edited_block_stops_the_run_with_nothing_written(self):
+        self.assertEqual(self.new("claude,graphify,formal")[0], 0)
+        lines, begin, end = UpdateTest.block_lines(self, "AGENTS.md", "graphify", "agents-guidance")
+        edited = lines[:end] + ["my own note"] + lines[end:]
+        moved = [lines[begin]] + lines[:begin] + lines[begin + 1:]
+        for label, content in (("line added", edited), ("BEGIN moved up", moved)):
+            with self.subTest(label):
+                self.write("AGENTS.md", "\n".join(content))
+                before = tree_hash(self.target())
+                code, out, err = self.remove("graphify")
+                self.assertEqual(code, 2)
+                self.assertIn("--update", err)
+                self.assertEqual(tree_hash(self.target()), before)
+
+    def test_crlf_file_with_blocks_stops_the_run(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        with open(self.path("AGENTS.md"), "rb") as handle:
+            data = handle.read()
+        with open(self.path("AGENTS.md"), "wb") as handle:
+            handle.write(data.replace(b"\n", b"\r\n"))
+        before = tree_hash(self.target())
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 2)
+        self.assertIn("AGENTS.md", err)
+        self.assertEqual(tree_hash(self.target()), before)
+        self.assertIn("graphify", self.manifest()["modules"])
+
+    def test_skipped_entries_are_called_out(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        os.symlink("AGENTS.md", self.path("link"))
+        code, out, err = self.remove("graphify", extra=["--skip-unsafe-entries"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("may still hold", out)
+
+    def modules_copy(self):
+        root = os.path.join(self.work, "fake-modules")
+        shutil.copytree(install.MODULES_DIR, root)
+        saved = install.MODULES_DIR
+        install.MODULES_DIR = root
+        self.addCleanup(setattr, install, "MODULES_DIR", saved)
+        return root
+
+    def test_module_claiming_a_base_file_does_not_delete_it(self):
+        self.assertEqual(self.new("claude,graphify")[0], 0)
+        root = self.modules_copy()
+        with open(self.path("CONTRIBUTING.md"), "rb") as handle:
+            data = handle.read()
+        with open(os.path.join(root, "graphify", "files", "CONTRIBUTING.md"), "wb") as handle:
+            handle.write(data)
+        code, out, err = self.remove("graphify")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.exists(self.path("CONTRIBUTING.md")))
+
+    def test_file_shipped_by_two_removed_modules_is_deleted_once(self):
+        self.assertEqual(self.new("claude,graphify,formal")[0], 0)
+        root = self.modules_copy()
+        for name in ("graphify", "formal"):
+            os.makedirs(os.path.join(root, name, "files"), exist_ok=True)
+            with open(os.path.join(root, name, "files", "shared.txt"), "w") as handle:
+                handle.write("same\n")
+        self.write("shared.txt", "same\n")
+        code, out, err = self.remove("graphify", "formal")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.lexists(self.path("shared.txt")))
+        self.assertEqual(self.manifest()["modules"], ["claude"])
+
+    # -- external modules -----------------------------------------------
+
+    def test_external_module_is_removed_without_its_store(self):
+        store = self.store()
+        self.assertEqual(self.new("claude,my_kb=" + store)[0], 0)
+        shutil.rmtree(store)
+        code, out, err = self.remove("my_kb")
+        self.assertEqual(code, 0, err)
+        manifest = self.manifest()
+        self.assertEqual(manifest["modules"], ["claude"])
+        self.assertNotIn("external_modules", manifest)
+        _, tree = self.files()
+        self.assertEqual(tree, self.snapshot("claude"))
+
+    def test_removal_keeps_other_external_entries(self):
+        self.assertEqual(self.new("claude,a=" + self.store(name="one") + ",b=" + self.store(name="two"))[0], 0)
+        kept = self.manifest()["external_modules"]["b"]
+        self.assertEqual(self.remove("a")[0], 0)
+        manifest = self.manifest()
+        self.assertEqual(manifest["external_modules"], {"b": kept})
+        self.assertNotIn("module:a ", self.read("AGENTS.md"))
+        self.assertIn("module:b ", self.read("AGENTS.md"))
+
+    def test_builtin_and_external_removed_together(self):
+        self.assertEqual(self.new("claude,graphify,my_kb=" + self.store())[0], 0)
+        self.assertEqual(self.remove("graphify", "my_kb")[0], 0)
+        _, tree = self.files()
+        self.assertEqual(tree, self.snapshot("claude"))
+
+    def test_registry_is_not_consulted_or_changed(self):
+        store = self.store()
+        self.assertEqual(run(["--register", store])[0], 0)
+        self.assertEqual(self.new("claude,my_kb")[0], 0)
+        registry = os.path.join(self.work, "xdg", "claude-project-template", "registry.json")
+        with open(registry, "rb") as handle:
+            before = handle.read()
+        self.assertEqual(self.remove("my_kb")[0], 0)
+        with open(registry, "rb") as handle:
+            self.assertEqual(handle.read(), before)
 
 
 class ModuleHygieneTest(unittest.TestCase):

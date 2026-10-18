@@ -165,3 +165,36 @@ Accepted residuals:
 - Registry writers are not locked; the last writer wins.
 - Unicode-normalization and NTFS aliases were exercised only on macOS (NFC/NFD,
   case); Windows was not.
+
+## Addendum 2026-10-18: module removal
+
+`--remove` adds deletion inside the project. Its inputs are the same untrusted
+project, manifest, and command-line names; it reads no store and no registry.
+
+Permitted deletions: regular files whose bytes equal the module's own file after
+name substitution, and directories left empty by them. Never `base/` files, `.git`,
+edited files, or anything outside the project.
+
+Mitigations, each covered by a regression test:
+
+- Deletion paths go through `check_write_paths` (no symlink component, no `.git`,
+  regular and writable), then `delete_files`, which opens the root and each parent
+  with `O_DIRECTORY|O_NOFOLLOW` relative to the previous descriptor, checks the
+  target with `fstatat` (no follow), and uses `unlink`/`rmdir` with `dir_fd`. A parent
+  swapped for a symlink after the check fails to open instead of redirecting the
+  delete. Without `dir_fd` support the installer deletes nothing.
+- Deletions run after the other writes and before the manifest, so an interrupted run
+  leaves a manifest that still lists the module and a rerun completes it.
+- A file holding the removed module's blocks that does not round-trip, whose
+  built-in block differs from the module's fragment, or that would still hold a
+  removed module's marker after the run, stops the run before any write.
+- Files that `base/` or a remaining module also ships (compared case-folded) are never
+  deleted, and a path shipped by two removed modules is deleted once.
+
+Accepted residuals: the write path's swap window above is unchanged (rename still
+follows a swapped parent); the delete path closes it only for deletion. A swap of the
+project root itself between `load_manifest` and the delete is bounded by the owner's
+account, as above. A file changed between the project scan and the delete is
+deleted or overwritten on that basis. An external module's blocks are removed without
+a baseline to compare, so text added inside one is lost. With `--skip-unsafe-entries`
+a skipped file keeps its blocks and the run says so.

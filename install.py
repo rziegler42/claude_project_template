@@ -686,11 +686,13 @@ def _content(text):
     return [line for line in text.split("\n") if line.strip()]
 
 
-def refresh_blocks(text, order, fresh, relpath):
+def refresh_blocks(text, order, fresh, relpath, drop=(), expect=None):
     """Return (text, blocks, used) with module blocks re-rendered from `fresh`.
 
     `fresh` maps module -> {slot: fragment}; other blocks keep their recorded
-    body. Refuses (ValueError) a layout that does not render back to itself.
+    body, and modules in `drop` lose theirs. Refuses (ValueError) a layout that
+    does not render back to itself, a kept block with no place left, or a
+    dropped block whose body differs from `expect[module][slot]` when given.
     """
     stripped, blocks = strip_blocks(text)
     recorded = {}
@@ -704,10 +706,23 @@ def refresh_blocks(text, order, fresh, relpath):
     same, used, _ = render(recorded)
     if _content(same) != _content(text) or set(blocks) - used:
         raise ValueError("block layout differs from the installer's")
+    for (module, slot), body in sorted(blocks.items()):
+        wanted = (expect or {}).get(module, {}).get(slot)
+        if module in drop and wanted is not None and _content(body) != _content(wanted):
+            raise ValueError(
+                "%s:%s differs from the module's fragment (edited, or the template "
+                "changed: run --update first)" % (module, slot)
+            )
     merged = {module: dict(slots) for module, slots in recorded.items()}
     for module, slots in fresh.items():
         merged.setdefault(module, {}).update(slots)
+    for module in drop:
+        merged.pop(module, None)
     new_text, used, _ = render(merged)
+    if drop:
+        lost = {key for key in blocks if key[0] not in drop} - used
+        if lost:
+            raise ValueError("%s:%s would lose its slot marker" % min(lost))
     return new_text, blocks, used
 
 
@@ -894,14 +909,57 @@ def check_write_paths(root, rels):
                 raise InstallError("not writable: %s" % final)
 
 
-def write_tree(target, tree):
+def can_delete_safely():
+    return (
+        os.unlink in os.supports_dir_fd and os.rmdir in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd and os.stat in os.supports_follow_symlinks
+        and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+    )
+
+
+def delete_files(root, rels):
+    """Unlink regular files below `root`, then rmdir parents left empty.
+
+    Every directory is opened relative to its parent's descriptor without
+    following symlinks, so a parent swapped for a symlink after the path check
+    fails to open instead of redirecting the delete.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    for rel in rels:
+        parts = rel.split("/")
+        fds = []
+        try:
+            fds.append(os.open(root, flags))
+            for part in parts[:-1]:
+                fds.append(os.open(part, flags, dir_fd=fds[-1]))
+            info = os.stat(parts[-1], dir_fd=fds[-1], follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                raise InstallError("not a regular file: %s" % rel)
+            os.unlink(parts[-1], dir_fd=fds[-1])
+            for depth in range(len(parts) - 1, 0, -1):
+                try:
+                    os.rmdir(parts[depth - 1], dir_fd=fds[depth - 1])
+                except OSError:
+                    break
+        except OSError as exc:
+            raise InstallError("cannot delete %s: %s" % (rel, exc.strerror or exc))
+        finally:
+            for fd in fds:
+                os.close(fd)
+
+
+def write_tree(target, tree, delete=()):
     """Write every file via a temporary sibling and rename, manifest last.
 
     A rename replaces the directory entry, so a hardlinked file's other names
     are never written through; if any temporary file cannot be created
-    nothing has been replaced yet.
+    nothing has been replaced yet. Files in `delete` are removed after the
+    other writes and before the manifest, so an interrupted run leaves a
+    manifest that still lists what a rerun must finish.
     """
-    check_write_paths(target, list(tree))
+    check_write_paths(target, list(tree) + list(delete))
+    if delete and not can_delete_safely():
+        raise InstallError("this platform cannot delete files safely")
     order = sorted(tree, key=lambda rel: (rel == MANIFEST, rel))
     staged = []
     try:
@@ -916,9 +974,16 @@ def write_tree(target, tree):
                 handle.write(tree[rel])
             if os.path.exists(dest):
                 os.chmod(temp, stat.S_IMODE(os.lstat(dest).st_mode))
+        manifest_dest = os.path.join(target, MANIFEST)
+        pending = list(delete)
         for temp, dest in staged:
+            if pending and dest == manifest_dest:
+                delete_files(target, pending)
+                pending = []
             os.replace(temp, dest)
         staged = []
+        if pending:
+            delete_files(target, pending)
     except OSError as exc:
         raise InstallError("cannot write %s: %s" % (exc.filename or target, exc.strerror or exc))
     finally:
@@ -1377,6 +1442,125 @@ def cmd_update(args, out):
     return 0
 
 
+def cmd_remove(args, out):
+    modules = load_modules()
+    project = os.path.abspath(args.dir)
+    builtin = set(modules)
+    manifest = load_manifest(project, builtin)
+    installed = list(manifest["modules"])
+    recorded = dict(manifest.get("external_modules", {}))
+    names = list(dict.fromkeys(args.remove))
+    for name in names:
+        if name not in installed and name not in recorded:
+            raise InstallError("module %r is not installed in this project" % name)
+    for other in installed:
+        if other in names or other not in modules:
+            continue
+        for name in modules[other]["requires"]:
+            if name in names:
+                raise InstallError(
+                    "%s requires %s; name %s too to remove both" % (other, name, other)
+                )
+    present = [n for n in installed if n in modules]
+    order = sorted(present, key=lambda n: (modules[n]["order"], n))
+    project_name = require_printable(
+        args.name or os.path.basename(project.rstrip(os.sep)), "project name"
+    )
+    skipped = [] if args.skip_unsafe_entries else None
+    existing = scan_project(project, skipped)
+    if skipped:
+        out("Skipped (not read, patched, or written through):")
+        for rel, reason in sorted(skipped):
+            out("  %s (%s)" % (rel, reason))
+
+    notes = []
+    writes = {}
+    for rel in sorted(existing):
+        data = existing[rel]
+        if not is_text(data) or b"BEGIN module:" not in data:
+            continue
+        text = data.decode("utf-8")
+        try:
+            new_text, _, _ = refresh_blocks(
+                text, order, {}, rel, drop=set(names),
+                expect={n: modules[n]["slots"] for n in names if n in modules},
+            )
+        except (ValueError, InstallError) as exc:
+            if any(("module:%s slot:" % name).encode() in data for name in names):
+                raise InstallError("%s: cannot remove its blocks (%s); nothing was written" % (rel, exc))
+            notes.append("%s: not updated (%s)" % (rel, exc))
+            continue
+        if new_text != text:
+            writes[rel] = new_text.encode("utf-8")
+
+    keep = {rel.casefold() for rel in collect_tree(BASE_DIR)}
+    for name in installed:
+        if name not in names and name in modules:
+            keep |= {rel.casefold() for rel in
+                     collect_tree(os.path.join(modules[name]["path"], "files"))}
+    deletes = []
+    kept = []
+    safe = can_delete_safely()
+    for name in names:
+        if name in recorded:
+            continue
+        if name not in modules:
+            notes.append("%s is no longer provided by the template; its files are left" % name)
+            continue
+        files = collect_tree(os.path.join(modules[name]["path"], "files"))
+        substitute(files, project_name)
+        for rel, data in sorted(files.items()):
+            if rel not in existing or rel.casefold() in keep:
+                continue
+            if writes.get(rel, existing[rel]) == data and safe:
+                writes.pop(rel, None)
+                if rel not in deletes:
+                    deletes.append(rel)
+            else:
+                kept.append(rel)
+
+    for rel in sorted(existing):
+        if rel in deletes:
+            continue
+        data = writes.get(rel, existing[rel])
+        for name in names:
+            if ("module:%s slot:" % name).encode() in data:
+                raise InstallError(
+                    "%s still holds blocks of %s after removal (CRLF, binary, or "
+                    "rearranged markers); nothing was written" % (rel, name)
+                )
+    if skipped:
+        notes.append("skipped entries may still hold blocks of the removed modules")
+    out("Removing modules: %s" % ", ".join(names))
+    for rel in kept:
+        out("  kept %s (differs from the module's file or cannot be deleted safely; not deleting)" % rel)
+    for note in notes:
+        out("  note: %s" % note)
+    commit, dirty = template_state()
+    manifest["template_commit"], manifest["template_dirty"] = commit, dirty
+    manifest["modules"] = [n for n in installed if n not in names]
+    for name in names:
+        recorded.pop(name, None)
+    if recorded:
+        manifest["external_modules"] = recorded
+    else:
+        manifest.pop("external_modules", None)
+    writes[MANIFEST] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if args.dry_run:
+        for rel in sorted(writes):
+            out("  would write %s" % rel)
+        for rel in sorted(deletes):
+            out("  would delete %s" % rel)
+        out("Dry run: nothing written.")
+        return 0
+    write_tree(project, writes, deletes)
+    for rel in sorted(writes):
+        out("  wrote %s" % rel)
+    for rel in sorted(deletes):
+        out("  deleted %s" % rel)
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Create or extend a project from the template.")
     parser.add_argument("target", nargs="?", help="directory for the new project")
@@ -1411,11 +1595,15 @@ def build_parser():
         "--update", "--upgrade", dest="update", nargs="*", metavar="MODULE",
         help="refresh installed modules (all, or those named) from this template",
     )
+    parser.add_argument(
+        "--remove", nargs="+", metavar="MODULE",
+        help="remove installed modules (blocks, unedited files, manifest entries)",
+    )
     parser.add_argument("--dir", default=".",
-                        help="project directory for --add and --update (default: .)")
+                        help="project directory for --add, --update and --remove (default: .)")
     parser.add_argument(
         "--skip-unsafe-entries", action="store_true",
-        help="with --add or --update: skip (and list) symlinks, special files, and oversized files "
+        help="with --add, --update or --remove: skip (and list) symlinks, special files, and oversized files "
              "instead of refusing; skipped entries are never read, patched, or written through",
     )
     return parser
@@ -1425,9 +1613,17 @@ def main(argv=None, out=print):
     args = build_parser().parse_args(argv)
     try:
         updating = args.update is not None
-        if args.skip_unsafe_entries and not (args.add or updating):
-            raise InstallError("--skip-unsafe-entries applies to --add and --update only")
+        removing = args.remove is not None
+        if args.skip_unsafe_entries and not (args.add or updating or removing):
+            raise InstallError("--skip-unsafe-entries applies to --add, --update and --remove only")
         registry_modes = (args.register is not None) + (args.unregister is not None)
+        if removing and (
+            registry_modes or args.list or args.add or updating or args.target or args.with_
+        ):
+            raise InstallError(
+                "--remove cannot be combined with --add, --update, --with, --list, "
+                "--register, --unregister, or a target directory"
+            )
         if updating and (registry_modes or args.list or args.add or args.target or args.with_):
             raise InstallError(
                 "--update cannot be combined with --add, --with, --list, --register, "
@@ -1446,6 +1642,8 @@ def main(argv=None, out=print):
             return cmd_register(args, out)
         if args.unregister is not None:
             return cmd_unregister(args, out)
+        if removing:
+            return cmd_remove(args, out)
         if updating:
             return cmd_update(args, out)
         if args.add:

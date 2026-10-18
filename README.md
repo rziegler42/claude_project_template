@@ -78,6 +78,43 @@ with this checkout. It never commits.
 - The manifest's `template_commit` and `template_dirty` are refreshed when anything
   is written. `--skip-unsafe-entries` works as for `--add`.
 
+## Remove a module
+
+```sh
+cd ../my-project
+~/projects/claude_project_template/install.py --remove graphify --dry-run   # preview
+~/projects/claude_project_template/install.py --remove graphify
+~/projects/claude_project_template/install.py --remove cad-freecad cad my_kb
+```
+
+`--remove` takes installed modules (built-in, or an external one by its recorded name)
+out of a project created by the installer. It never commits.
+
+- **Blocks** of the module are stripped from every file, with the rest of the file and
+  the `@module-slot:` marker lines untouched. A built-in module's block must still
+  equal the module's fragment: an edited block, or a template that changed since you
+  installed, stops the run with nothing written (run `--update`, or restore the block).
+  An external module's blocks cannot be checked, since its store may be gone, so
+  anything you wrote inside one goes with it.
+- **Module files** are deleted only when the project's copy is identical to the
+  module's file. One you edited, or that still carries another module's block, is kept
+  and reported. `base/` files are never deleted, and a directory left empty is
+  removed.
+- A module that another installed module `requires` is refused unless you name that
+  module too.
+- If a file that holds the module's blocks has malformed or hand-rearranged markers, or
+  would still hold them after the run (CRLF line endings, a binary file), the command
+  stops and writes nothing, because dropping the module from the manifest would leave
+  orphan blocks. With `--skip-unsafe-entries`, skipped files may still hold blocks and
+  the run says so.
+- An external module is removed from its recorded name alone; its store need not exist
+  and the registry is not read or changed (`--unregister` is separate).
+- Deletion opens each directory relative to its parent without following symlinks, so a
+  path swapped for a symlink during the run is refused. Where the platform lacks that,
+  files are kept and only blocks are stripped.
+- `.template-manifest` drops the module and refreshes `template_commit` and
+  `template_dirty`. `--dry-run` and `--skip-unsafe-entries` work as for `--update`.
+
 ## Use a standalone project as a module
 
 A standalone project can ship a `template-module/` descriptor and be installed as

@@ -42,6 +42,9 @@ the template or the template carrying per-project knowledge.
 - `--update` refreshes installed built-in and external modules in a project
   (2026-10-18, plan [0009](../plans/0009-installer-update.md)); the manifest digest
   detects a changed store.
+- `--remove` takes installed built-in and external modules out of a project: blocks
+  stripped, unedited module files deleted, manifest entries dropped (2026-10-18, plan
+  [0010](../plans/0010-installer-module-removal.md)).
 - The sibling `claude_knowledge_base` is a generator that creates stores. Its
   roadmap (`knowledge-base-starter`, candidate 7) expects this integration; it
   will also drop `--add-to` and ship the descriptor. Its owner is implementing the
