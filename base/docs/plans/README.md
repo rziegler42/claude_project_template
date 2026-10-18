@@ -17,6 +17,12 @@ outcome, affected files or components, dependencies, implementation steps,
 verification, and observable completion criteria. Call out risky, irreversible,
 security-sensitive, or externally visible actions before implementation.
 
+Give the active plan a short, unique title in place of the template heading,
+without a number (the number is only known at archive time), and set `Created:`
+to the date you start it. Tools identify a plan by its title and `Created:`
+date, so a reused or placeholder title can make a new plan look already
+reviewed. Archiving renames the heading to `# NNNN: Plan title`.
+
 Write a complete plan with `Status: Proposed`, then obtain explicit approval
 before changing it to `Approved` or beginning implementation. Use `In Progress`
 while implementation is underway.

@@ -1,7 +1,10 @@
-# Next plan
+# REPLACE_WITH_PLAN_TITLE
 
 Status: Empty — no active plan
 Created: YYYY-MM-DD
+
+<!-- Replace the heading with a short title unique among your plans (no number)
+and set Created to today's date; review tools identify a plan by both. -->
 
 ## Goal
 

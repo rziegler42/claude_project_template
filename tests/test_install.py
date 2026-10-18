@@ -902,6 +902,16 @@ class InstallerTest(unittest.TestCase):
 
     # -- plan-review module (plan 0004, Increment A) ----------------------
 
+    def test_empty_plan_heading_is_a_placeholder_not_a_shared_title(self):
+        code, out, err = self.new()
+        self.assertEqual(code, 0, err)
+        tree = read_tree(self.target())
+        self.assertEqual(tree["docs/plans/next.md"].splitlines()[0],
+                         "# REPLACE_WITH_PLAN_TITLE")
+        readme = tree["docs/plans/README.md"]
+        self.assertIn("unique title", readme)
+        self.assertIn("# NNNN: Plan title", readme)
+
     def test_plan_review_inserts_policy_receipt_and_archive_note(self):
         code, out, err = self.new("plan-review")
         self.assertEqual(code, 0, err)
