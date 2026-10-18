@@ -1,7 +1,10 @@
-# Next plan
+# REPLACE_WITH_PLAN_TITLE
 
 Status: Empty — no active plan
 Created: YYYY-MM-DD
+
+<!-- Replace the heading with a short title unique among your plans (no number)
+and set Created to today's date; review tools identify a plan by both. -->
 
 ## Goal
 
@@ -21,10 +24,7 @@ change it to Approved only after explicit approval. -->
 <!-- State verified assumptions, accepted decisions, compatibility boundaries,
 and any unresolved blocker or decision point. -->
 
-## Discovery and impact evidence
-
-<!-- Record the discovery or impact analysis that bounds the scope, or why it
-was skipped. -->
+<!-- @module-slot: plan-discovery -->
 
 ## Completion criteria
 
@@ -42,6 +42,20 @@ Affected areas: `REPLACE_WITH_PATHS_OR_COMPONENTS`
 
 Completion: REPLACE_WITH_OBSERVABLE_EVIDENCE
 
+### Increment B — REPLACE_WITH_NEXT_OUTCOME
+
+Dependencies: Increment A
+Affected areas: `REPLACE_WITH_PATHS_OR_COMPONENTS`
+
+1. REPLACE_WITH_IMPLEMENTATION_STEP
+2. REPLACE_WITH_VERIFICATION_STEP
+
+Completion: REPLACE_WITH_OBSERVABLE_EVIDENCE
+
+<!-- Remove unused increments. Add further increments with uppercase letters.
+For an explicitly approved insertion between stable B and C labels, use B-A,
+then B-B. -->
+
 ## Verification
 
 <!-- Name known repository commands and the behavior they prove. -->
@@ -51,6 +65,8 @@ Completion: REPLACE_WITH_OBSERVABLE_EVIDENCE
 <!-- Identify risky, irreversible, security-sensitive, or externally visible
 actions before implementation. Write "None identified" when applicable. -->
 
+<!-- @module-slot: plan-review -->
+
 ## Deferred work
 
 <!-- Record discoveries intentionally excluded from this plan. Remove this
@@ -59,4 +75,4 @@ section when there is no deferred work. -->
 ## Result
 
 <!-- Complete this only after verification. Archive the plan according to
-base/docs/plans/README.md, then reset this file to the empty template. -->
+README.md, then reset this file to the empty template. -->
