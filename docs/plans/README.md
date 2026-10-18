@@ -14,3 +14,4 @@ and formats in `base/docs/plans/README.md`; `next.md` is the sole active plan.
 | [0005](0005-codex-module.md) | Completed | Harness-marked `codex` module on top of `plan-review`: concrete Codex plan-review guidance and receipt mapping |
 | [0006](0006-external-module-core.md) | Completed | `name=path` in `--with` and `--add`: standalone projects with a `template-module/` descriptor install as modules (fragments only), recorded in the manifest |
 | [0007](0007-registry.md) | Completed | Machine-local registry: `--register`, `--unregister`, `--list` for standalone projects, and registered names in `--with` and `--add` |
+| [0008](0008-external-module-review.md) | Completed | Adversarial review of the external-module and registry paths; seven findings fixed with regression tests, ADR 0002 addendum, ADR 0003 (Proposed) |

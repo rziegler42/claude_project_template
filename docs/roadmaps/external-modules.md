@@ -33,6 +33,10 @@ the template or the template carrying per-project knowledge.
   `--add`.
 - Candidate 2 is complete (2026-10-18, plan [0007](../plans/0007-registry.md)):
   `--register`, `--unregister`, `--list`, and registered names work.
+- Candidate 3 is complete (2026-10-18, plan
+  [0008](../plans/0008-external-module-review.md)): two adversarial passes, findings
+  fixed, ADR 0002 addendum, and [ADR 0003](../decisions/0003-external-module-mechanism.md)
+  (Proposed until the owner accepts it).
 - The sibling `claude_knowledge_base` is a generator that creates stores. Its
   roadmap (`knowledge-base-starter`, candidate 7) expects this integration; it
   will also drop `--add-to` and ship the descriptor. That work belongs to that
@@ -105,4 +109,5 @@ registering and writing an external module; no new behavior.
 ## Related decisions
 
 - [ADR 0001](../decisions/0001-module-and-slot-architecture.md): modules and slots.
-- [ADR 0002](../decisions/0002-installer-trust-model.md): trust model to extend.
+- [ADR 0002](../decisions/0002-installer-trust-model.md): trust model, with the 2026-10-18 addendum for stores and the registry.
+- [ADR 0003](../decisions/0003-external-module-mechanism.md): the external-module mechanism.
