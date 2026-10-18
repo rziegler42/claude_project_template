@@ -7,7 +7,7 @@ Usage:
   install.py --list
   install.py --add <module|name=PATH>... [--dir DIR]
   install.py --register PATH [--name N] [--dry-run]
-  install.py --unregister NAME
+  install.py --unregister NAME [--dry-run]
   (--registry FILE overrides the registry location for any of the above)
 
 `name=PATH` installs the slot fragments of a standalone project that ships a
@@ -30,7 +30,7 @@ MODULES_DIR = os.path.join(ROOT, "modules")
 MANIFEST = ".template-manifest"
 SCHEMA = 1
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 EXT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}\Z")
 DESCRIPTOR_DIR = "template-module"
@@ -159,6 +159,23 @@ def is_within(child, parent):
         probe = up
 
 
+def shown_format(fmt):
+    """The store's module_format for a message, bounded so a hostile value cannot flood it."""
+    if isinstance(fmt, bool) or not isinstance(fmt, int):
+        return "of the wrong type"
+    return str(fmt) if len(str(fmt)) <= 12 else "out of range"
+
+
+def same_store(first, second):
+    """True when two store paths are the same directory, including case aliases."""
+    if first == second:
+        return True
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
 def load_external(name, value, target, builtin):
     """Wrap `read_external` so an OS error on the store is a user-facing error."""
     try:
@@ -181,10 +198,19 @@ def read_external(name, value, target, builtin):
     if name in builtin:
         raise InstallError("%r is a built-in module name and cannot name a store" % name)
     require_printable(value, "module path")
-    path = os.path.abspath(os.path.expanduser(value))
+    path = os.path.expanduser(value)
+    while True:  # drop trailing separators and "." so a symlink there is still seen as one
+        trimmed = path.rstrip(os.sep)
+        if trimmed.endswith(os.sep + "."):
+            trimmed = trimmed[:-1]
+        if trimmed == path:
+            break
+        path = trimmed
+    path = path or os.sep
     if os.path.islink(path):
         raise InstallError("module %s: store is a symlink: %s" % (name, path))
     store = os.path.realpath(path)
+    require_printable(store, "module path")
     if is_within(store, ROOT) or is_within(ROOT, store):
         raise InstallError(
             "module %s: store must not be, contain, or be inside the template repository" % name
@@ -214,8 +240,7 @@ def read_external(name, value, target, builtin):
     if isinstance(fmt, bool) or not isinstance(fmt, int) or fmt not in MODULE_FORMATS:
         raise InstallError(
             "module %s: module_format %s is not supported (this installer supports %s)"
-            % (name, fmt if isinstance(fmt, int) and not isinstance(fmt, bool) else "of the wrong type",
-               ", ".join(str(f) for f in MODULE_FORMATS))
+            % (name, shown_format(fmt), ", ".join(str(f) for f in MODULE_FORMATS))
         )
     for key, required in (("description", True), ("hint", False)):
         if key not in meta and not required:
@@ -226,14 +251,15 @@ def read_external(name, value, target, builtin):
                 "module %s: %s must be a single printable line of 1-%d characters"
                 % (name, key, DESCRIPTION_MAX)
             )
+    entries = os.listdir(slot_dir)
+    if len(entries) > FRAGMENT_MAX_COUNT:
+        raise InstallError("module %s: more than %d fragments" % (name, FRAGMENT_MAX_COUNT))
     raw_slots = {}
-    for entry in os.listdir(slot_dir):
+    for entry in entries:
         slot = entry[:-3]
         if not entry.endswith(".md") or not NAME_RE.match(slot):
             raise InstallError("module %s: unexpected entry in %s/slots" % (name, DESCRIPTOR_DIR))
         raw_slots[slot] = read_regular(os.path.join(slot_dir, entry), FRAGMENT_MAX_BYTES)
-    if len(raw_slots) > FRAGMENT_MAX_COUNT:
-        raise InstallError("module %s: more than %d fragments" % (name, FRAGMENT_MAX_COUNT))
     where = store
     if target is not None:
         parent = os.path.realpath(os.path.dirname(os.path.abspath(target)))
@@ -243,12 +269,12 @@ def read_external(name, value, target, builtin):
     for slot in sorted(raw_slots):
         if not is_text(raw_slots[slot]):
             raise InstallError("module %s: fragment %s is not UTF-8 text" % (name, slot))
-        text = raw_slots[slot].decode("utf-8")
-        if any(mark in text for mark in FRAGMENT_FORBIDDEN):
-            raise InstallError("module %s: fragment %s contains a reserved marker" % (name, slot))
-        slots[slot] = text.replace("REPLACE_WITH_MODULE_NAME", name).replace(
+        text = raw_slots[slot].decode("utf-8").replace("REPLACE_WITH_MODULE_NAME", name).replace(
             "REPLACE_WITH_MODULE_PATH", where
         )
+        if any(mark in text for mark in FRAGMENT_FORBIDDEN):
+            raise InstallError("module %s: fragment %s contains a reserved marker" % (name, slot))
+        slots[slot] = text
     digest = descriptor_digest(
         [("module.json", raw)] + [("slots/%s.md" % s, raw_slots[s]) for s in sorted(raw_slots)]
     )
@@ -274,10 +300,9 @@ def load_externals(entries, target, builtin, registered=()):
                     "register it again)" % (exc, name)
                 )
             raise
-        if meta["path"] in paths:
-            raise InstallError(
-                "modules %s and %s name the same store" % (paths[meta["path"]], name)
-            )
+        for seen, other in paths.items():
+            if same_store(seen, meta["path"]):
+                raise InstallError("modules %s and %s name the same store" % (other, name))
         paths[meta["path"]] = name
         loaded[name] = meta
     return loaded
@@ -379,7 +404,9 @@ def registered_entries(args, entries, builtin):
             resolved.append((name, stores[name]))
             registered.add(name)
         else:
-            if name in stores and os.path.realpath(os.path.expanduser(value)) != stores[name]:
+            if name in stores and not same_store(
+                os.path.realpath(os.path.expanduser(value)), stores[name]
+            ):
                 raise InstallError(
                     "module %s is registered at %s, not at the given path; use that path "
                     "or unregister it first" % (name, stores[name])
@@ -1008,7 +1035,7 @@ def cmd_register(args, out):
     meta = load_external(name, args.register, None, builtin)
     location = registry_path(args.registry)
     stores = load_registry(location)
-    if stores.get(name) == meta["path"]:
+    if name in stores and same_store(stores[name], meta["path"]):
         out("%s is already registered at %s." % (name, meta["path"]))
         return 0
     if name in stores:
@@ -1016,7 +1043,7 @@ def cmd_register(args, out):
             "%s is already registered at %s; unregister it first" % (name, stores[name])
         )
     for other, where in stores.items():
-        if where == meta["path"]:
+        if same_store(where, meta["path"]):
             raise InstallError(
                 "%s is already registered as %s; unregister it first" % (where, other)
             )
@@ -1041,6 +1068,10 @@ def cmd_unregister(args, out):
     stores = load_registry(location)
     if name not in stores:
         out("%s is not registered." % name)
+        return 0
+    if args.dry_run:
+        out("Would unregister %s (%s)" % (name, stores[name]))
+        out("Dry run: nothing written.")
         return 0
     del stores[name]
     save_registry(location, stores)

@@ -1320,11 +1320,98 @@ class ExternalModuleTest(unittest.TestCase):
         self.assertEqual(self.new("graphify")[0], 0)
         self.assertEqual(self.add("kb=" + store)[0], 0)
 
+    # -- trust-model review findings (plan 0008) ----------------------
+
+    def test_placeholder_cannot_complete_a_reserved_marker(self):
+        store = self.store(slots={"agents-guidance": b"<!-- @module-slREPLACE_WITH_MODULE_NAME: x -->\n"})
+        self.assertRefused(store, name="ot", fragment="reserved marker")
+        store = self.store(
+            name="other", slots={"agents-guidance": b"<!-- BEGIN modREPLACE_WITH_MODULE_NAME:x -->\n"}
+        )
+        self.assertRefused(store, name="ule", fragment="reserved marker")
+
+    def alias_of(self, store):
+        alias = os.path.join(os.path.dirname(store), os.path.basename(store).upper())
+        if not (os.path.exists(alias) and os.path.samefile(alias, store)):
+            self.skipTest("filesystem is case sensitive")
+        return alias
+
+    def test_same_store_under_a_case_alias_is_one_store(self):
+        store = self.store()
+        alias = self.alias_of(store)
+        with self.assertRaises(install.InstallError) as ctx:
+            install.load_externals([("n1", store), ("n2", alias)], self.target(), self.builtin)
+        self.assertIn("name the same store", str(ctx.exception))
+
+    def test_non_printable_real_path_is_refused(self):
+        hostile = os.path.join(self.work, "evil\x1b[2Jdir")
+        os.mkdir(hostile)
+        make_store(hostile)
+        link = os.path.join(self.work, "lk")
+        os.symlink(hostile, link)
+        message = self.assertRefused(os.path.join(link, "my_kb"), fragment="printable")
+        self.assertNotIn("\x1b", message)
+
+    def test_dotdot_through_a_symlink_resolves_physically(self):
+        os.makedirs(os.path.join(self.work, "a", "b"))
+        good = make_store(os.path.join(self.work, "a"), name="good")
+        make_store(self.work, name="good", slots={"agents-guidance": b"WRONG STORE\n"})
+        link = os.path.join(self.work, "lnk")
+        os.symlink(os.path.join(self.work, "a", "b"), link)
+        meta = self.load(os.path.join(link, "..", "good"))
+        self.assertEqual(meta["path"], os.path.realpath(good))
+        self.assertNotIn("WRONG STORE", meta["slots"]["agents-guidance"])
+
+    def test_name_pattern_rejects_a_trailing_newline(self):
+        store = self.store(slots={"agents-guidance\n": b"x\n"})
+        self.assertRefused(store, fragment="unexpected entry")
+        self.new("graphify")
+        self.write_manifest({"schema": 1, "modules": ["claude\n"]})
+        code, out, err = run(["--add", "graphify", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertIn("malformed", err)
+
+    def test_unsupported_format_message_does_not_echo_a_huge_number(self):
+        digits = "9" * 4000
+        store = self.store(module=('{"module_format": %s, "description": "d"}' % digits).encode())
+        message = self.assertRefused(store, fragment="module_format")
+        self.assertNotIn("9999999999", message)
+
+    def test_fragment_count_is_checked_before_reading_fragments(self):
+        store = self.store(slots={"s%d" % n: b"x\n" for n in range(install.FRAGMENT_MAX_COUNT + 1)})
+        real, reads = install.read_regular, []
+
+        def spy(path, *args):
+            reads.append(path)
+            return real(path, *args)
+
+        install.read_regular = spy
+        self.addCleanup(setattr, install, "read_regular", real)
+        self.assertRefused(store, fragment="more than")
+        self.assertEqual([p for p in reads if os.sep + "slots" + os.sep in p], [])
+
     def test_refuses_symlinked_store(self):
         store = self.store()
         link = os.path.join(self.work, "linked")
         os.symlink(store, link)
         self.assertRefused(link)
+
+    def test_dot_names_the_current_directory(self):
+        store = self.store()
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(store)
+        for value in (".", "./", "./."):
+            with self.subTest(value=value):
+                self.assertEqual(self.load(value)["path"], os.path.realpath(store))
+
+    def test_refuses_symlinked_store_with_trailing_dot_components(self):
+        store = self.store()
+        link = os.path.join(self.work, "linked")
+        os.symlink(store, link)
+        for suffix in ("/", "/.", "/./.", "//./"):
+            with self.subTest(suffix=suffix):
+                self.assertRefused(link + suffix, fragment="symlink")
 
     def test_refuses_git_component_in_store_path(self):
         hidden = os.path.join(self.work, ".git")
@@ -1739,6 +1826,40 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertFalse(os.path.exists(os.path.dirname(self.reg)))
         self.assertIn("Dry run", out)
+
+    def test_unregister_dry_run_removes_nothing(self):
+        store = self.store()
+        self.assertEqual(self.register(store)[0], 0)
+        before = self.stores()
+        code, out, err = run(["--unregister", "my_kb", "--dry-run", "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.stores(), before)
+        self.assertIn("Would unregister", out)
+        self.assertIn("Dry run", out)
+
+    def test_register_refuses_the_same_store_under_a_case_alias(self):
+        store = self.store(name="alias_kb")
+        alias = os.path.join(self.work, "ALIAS_KB")
+        if not (os.path.exists(alias) and os.path.samefile(alias, store)):
+            self.skipTest("filesystem is case sensitive")
+        self.assertEqual(self.register(store, "--name", "ra")[0], 0)
+        before = self.stores()
+        code, out, err = self.register(alias, "--name", "rb")
+        self.assertEqual(code, 2, out)
+        self.assertIn("already registered", err)
+        self.assertEqual(self.stores(), before)
+
+    def test_register_refuses_a_non_printable_real_path(self):
+        hostile = os.path.join(self.work, "evil\x1b[2Jdir")
+        os.mkdir(hostile)
+        make_store(hostile)
+        link = os.path.join(self.work, "lk")
+        os.symlink(hostile, link)
+        code, out, err = self.register(os.path.join(link, "my_kb"))
+        self.assertEqual(code, 2, out)
+        self.assertIn("printable", err)
+        self.assertNotIn("\x1b", out + err)
+        self.assertFalse(os.path.exists(self.reg))
 
     def test_register_and_unregister_leave_the_store_untouched(self):
         store = self.store()

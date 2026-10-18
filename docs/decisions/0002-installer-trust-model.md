@@ -106,3 +106,62 @@ Accepted residuals:
 
 - `install.py`, `tests/test_install.py`, `README.md` (security notes).
 - ADR 0001; plan 0003 (`docs/plans/0003-installer-security-review.md`).
+
+## Addendum (2026-10-18): standalone stores and the registry
+
+Plans 0006 and 0007 let `install.py` read a standalone project (a "store") and a
+machine-local registry. The mechanism is recorded in
+[ADR 0003](0003-external-module-mechanism.md); this addendum extends the trust
+model above to the two new inputs. The decisions above are unchanged.
+
+Trust model additions:
+
+- Trusted as intent only: a store path the owner types or registers.
+- Untrusted data: every byte in a store (`module.json`, fragments, directory
+  names), the registry file, and an `external_modules` entry in a project's
+  `.template-manifest`. A store's bytes are read, never executed, and no
+  subprocess runs in or on a store, so a store's `.git`, hooks, and
+  `.gitattributes` are never consulted.
+- Out of scope, as for built-in modules: the owner deliberately installing a
+  store whose fragment text is hostile guidance. Fragment text is trusted
+  guidance, not code; ESC and bidirectional characters in it are allowed.
+- Permitted writes gain one location: `registry.json` and its temporary sibling
+  in the registry directory (mode 0700, file 0600), nothing else.
+
+Mitigations, each covered by a regression test:
+
+- A store is refused when the given path is a symlink (its final component, with
+  trailing separators and `.` components ignored), its real path contains a
+  `.git` component, is not printable single-line text, or is, contains, or is
+  inside the template or the target (by real path and identity, both
+  directions). The real path is resolved physically, so `..` after a symlink
+  cannot select a different store than the one checked.
+- `module.json`, `slots/`, and each fragment go through the same
+  `lstat`/`O_NOFOLLOW`/`O_NONBLOCK` read as module trees; descriptor and
+  fragment sizes and the fragment count are capped, and the count is checked
+  before any fragment is read. One read feeds both the manifest digest and the
+  installed text.
+- Reserved marker lines are refused in fragments after placeholder
+  substitution, so a module name or path cannot complete a marker.
+- Names are lowercase and end at the end of the string (`\Z`), so a trailing
+  newline is never accepted; a store's `module_format` is shown in messages only
+  when short.
+- The same store cannot be installed or registered twice under case or
+  normalization aliases (compared by file identity).
+- The registry is re-verified through the same checks at every use, loaded only
+  when a name needs it, and refused when it is a symlink, a special file, over
+  1 MiB, or malformed; `--unregister --dry-run` removes nothing.
+
+Accepted residuals:
+
+- The concurrent local attacker above can also swap a store directory or the
+  registry between the check and the read; the read function itself is not
+  hardened against a file replaced after `lstat`. The owner's account is
+  required.
+- A `--with` path containing a comma is split into entries and fails closed,
+  unless the second piece is itself a valid module name.
+- The registry records the real path in the case the owner typed on a
+  case-insensitive filesystem (cosmetic).
+- Registry writers are not locked; the last writer wins.
+- Unicode-normalization and NTFS aliases were exercised only on macOS (NFC/NFD,
+  case); Windows was not.
