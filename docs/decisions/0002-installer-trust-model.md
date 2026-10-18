@@ -283,5 +283,17 @@ acts on these values; consumers must treat them as data, resolve paths against t
 project root, confirm with `realpath` that they stay inside, and not follow symlinks (a
 role may name any file in the project, including one the manifest's editor chose). The
 path check rejects `\`, `:`, and a `.git` component with trailing dots or spaces, so a
-consumer on Windows cannot be steered into git metadata or another drive. External modules cannot declare them, since their descriptor format rejects
-unknown keys.
+consumer on Windows cannot be steered into git metadata or another drive.
+
+External modules join this under `module_format` 2. A format 2 descriptor may declare
+the same keys, validated by the same function as a built-in module's, and format 1 still
+rejects them. The installer checks `module_format` before the keys. An external module's
+entry also carries `store`, the location the user gave: `../` plus one safe component, or
+an absolute path, and nothing else (`foo/bar`, `.`, `../a/b` and a `.git` component are
+refused). The recorded `store` is a pointer for consumers and never an input to the
+installer, which re-verifies a store from the registry or the path named on the command
+line. A consumer resolves a relative `store` against the project root, applies the same
+`realpath` check, and treats a missing store as unavailable. An absolute `store` is
+machine-specific and can expose a home directory name; the sibling form avoids both.
+External entries are validated against `external_modules` and the external name pattern,
+built-in entries against `modules` and the built-in pattern.

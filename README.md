@@ -188,8 +188,12 @@ A store contains `template-module/module.json` and `template-module/slots/<slot>
 { "module_format": 1, "description": "One line, 1-200 characters", "hint": "optional next step" }
 ```
 
-- `module_format` must be 1. There is no `name`, `order`, `requires` or `harness`
-  key; unknown keys are errors.
+- `module_format` must be 1 or 2. There is no `name`, `order`, `requires` or
+  `harness` key; unknown keys are errors. Format 2 additionally allows the optional
+  `type`, `paths` and `data` keys described under "Module info"; format 1 rejects
+  them. A store that uses them needs an installer that knows format 2: an older one
+  refuses it, with an "unknown module.json keys" or "module_format 2 is not
+  supported" error, and writes nothing.
 - Each fragment is named for a slot in the table below, is UTF-8 text of at most
   64 KiB, and at most 16 are allowed. It must not contain `@module-slot:`,
   `BEGIN module:` or `END module:`, and its text must be tool-neutral.
@@ -263,14 +267,32 @@ installed module that declares anything. `--new` and `--add` record entries, `--
 drops them, and a full `--update` rebuilds them from the current template (an entry for
 a module the template no longer provides is kept). A run limited to named modules
 leaves them alone. A module that declares nothing has no entry, and a project with no
-declaring module has no `module_info` key. External modules cannot declare these keys.
+declaring module has no `module_info` key.
+
+An external module (a standalone project used as a module) may declare `type`,
+`paths` and `data` in its `module.json` when it uses `module_format` 2. Every
+external module has an entry, format 1 included, because the entry also records
+`store`: where the store lives, as the user gave it. `store` is `../name` when the
+store is a sibling of the project, otherwise the absolute path, and no other form is
+accepted. A full `--update` re-verifies each registered store and rewrites its entry
+even when the descriptor is unchanged, so a moved store or an older manifest is
+corrected; a store it cannot verify keeps its entry. An absolute `store` is specific
+to one machine, so prefer keeping the project and the store side by side.
+
+```json
+"module_info": { "my_kb": { "store": "../my_kb", "type": "knowledge-base",
+                            "paths": { "index": "docs/kb/index.md" } } }
+```
 
 For readers of the manifest: a missing entry means "not declared", and projects
 installed before this key existed have none until their next full `--update`.
 Treat the values as untrusted data, as with the rest of the manifest: resolve each
 path against the project root, check with `realpath` that it stays inside, and do not
-follow a symlink out of the project. A path may name any file in the project. The values come from the template, so they are the same
-in every project; a location chosen at install time is not recorded.
+follow a symlink out of the project. A path may name any file in the project.
+Resolve a relative `store` against the project root too, and expect the store to be
+missing: treat that as "not available", not an error. For a built-in module the
+values come from the template, so they are the same in every project; the only
+location chosen at install time is an external module's `store`.
 
 ## Writing a module
 

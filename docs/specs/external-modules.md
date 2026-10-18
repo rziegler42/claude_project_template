@@ -57,9 +57,19 @@ errors.
 
 | Key | Type | Rule |
 |---|---|---|
-| `module_format` | integer | Must equal a format the installer supports (1 today) |
+| `module_format` | integer | Must equal a format the installer supports (1 or 2) |
 | `description` | string | Printable single-line text, 1-200 characters |
 | `hint` | string, optional | Printable single-line text, at most 200 characters; printed under "Next steps" |
+| `type` | string, optional, format 2 only | Lowercase name, at most 64 characters |
+| `paths` | object, optional, format 2 only | Up to 16 roles mapped to safe project-relative paths |
+| `data` | object, optional, format 2 only | Plain JSON, at most 4 levels, 256 values and 4096 bytes |
+
+`type`, `paths` and `data` are the same keys, with the same bounds, that a built-in
+module may declare (ADR 0002, "module info"). The installer checks `module_format`
+before the keys, so an unsupported format reports the format. A format 1 descriptor
+that uses them is an unknown-key error. An installer that predates format 2 refuses
+such a store before writing anything, either as an unknown-key error or, when the
+store uses none of them, as an unsupported format.
 
 There is no `name`, `order`, `requires`, or `harness` key. The name comes from the
 registry or the command line. External modules install after all built-in modules,
@@ -199,7 +209,9 @@ names only. An optional object is added:
 }
 ```
 
-- The path is not stored; it is machine-specific.
+- The path is not stored in `external_modules`; it is machine-specific. The location
+  is recorded separately, in `module_info.<name>.store`, as the sibling form
+  `../<store>` or an absolute path (see below).
 - The digest is SHA-256 over the raw bytes of the descriptor files as read from the
   store, before any substitution. The files are taken in this order: `module.json`,
   then each `slots/<slot>.md` sorted by slot name (byte order). For each file the
@@ -210,6 +222,13 @@ names only. An optional object is added:
 - A manifest without `external_modules` stays valid. When present it is validated:
   an object, names matching the rule and not equal to any built-in name, a known
   `module_format`, and a digest of exactly 64 lowercase hex digits.
+- `module_info` has one entry per external module: `store` (required) plus the
+  `type`, `paths` and `data` a format 2 descriptor declares. `store` is `../` plus one
+  safe component, or `/` plus safe components; every other form is refused on load.
+  The installer writes an entry on `--new`, `--add` and every successful `--update`
+  re-verification, keeps the entry of a store it cannot verify, and drops it on
+  `--remove`. Consumers treat the entry as untrusted data and a missing store as "not
+  available".
 - `--add` of a name already recorded reports "already installed" and writes nothing.
   It does not read the store or the registry, and it does not compare the digest:
   the digest is recorded in this version and checked by a later refresh feature.

@@ -41,7 +41,10 @@ behaviour; plans 0006 and 0007 implemented it; plan 0008 reviewed it adversarial
 - Shipping files (`files/`) from stores, `requires` between modules, or a remote
   or registry-hosted store. Deferred: they enlarge the read boundary.
 - Reference-only modules that record a path in the manifest. Rejected: a path in
-  a committed manifest is machine-specific and a path-based trust input.
+  a committed manifest is machine-specific and a path-based trust input. (Plan 0016
+  later records the store location in `module_info`, never as a trust input: the
+  installer re-verifies the store from the registry, not from the recorded path, and
+  consumers treat it as untrusted data. The sibling form keeps it portable.)
 - Requiring registration. Rejected: a path needs no registry entry.
 
 ## Consequences
@@ -51,6 +54,8 @@ behaviour; plans 0006 and 0007 implemented it; plan 0008 reviewed it adversarial
   follow the ADR 0002 addendum.
 - Refreshing an installed store when it changes is not implemented; the digest is
   recorded for that purpose.
+- `module_format` 2 lets a store declare `type`, `paths` and `data`, and the manifest
+  records them with the store location in `module_info` (ADR 0002 addendum).
 
 ## Verification
 
