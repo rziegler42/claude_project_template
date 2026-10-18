@@ -85,7 +85,13 @@ with this checkout. It never commits.
   `base/` or module file that differs from the template (module blocks are ignored
   in the comparison), including a `docs/plans/next.md` in use, and `skipped` for a
   file you created that carries slot or block markers. The list is printed with
-  `--dry-run` too, so you can see what differs before changing anything.
+  `--dry-run` too, so you can see what differs before changing anything. For a
+  `kept` file the line also says whether the template changed that file since the
+  commit recorded in `.template-manifest` (`template changed since <commit>`, or
+  `unchanged`), found by rebuilding the template as installed from this checkout's
+  git history, or why that is not possible (`no merge base: ...`). The manifest
+  also records the project name, the commit of modules added later with `--add`,
+  and, for files `--update` left differing, the commit they were judged against.
 - **External modules** are compared by the digest in `.template-manifest`. Without
   names, a registered store is looked up in the registry; one that is not registered
   or fails verification is skipped with a note. Name it by registered name or

@@ -239,5 +239,30 @@ fixed by the block-aware one). Suite 237 pass, `git diff --check` clean. A dry
 run against `claude_knowledge_base` lists its stale `docs/plans/README.md`
 and four project-created files with markers.
 
+Increment A committed as 3129155.
+
+Increment B done (not yet committed). Rulings and deviations from the plan text:
+
+- The template history is read with `git ls-tree` and `git cat-file --batch`
+  instead of `git archive`: no tar extraction, and export attributes cannot
+  rewrite or drop files. Files are still written into a private temporary
+  directory (exclusive, no-follow creation) and rendered with the existing
+  readers.
+- `file_bases` is written and consumed in B, not C, because `--update` already
+  advances `template_commit` and would otherwise discard the base of every file
+  it leaves differing in the window between B and C. A partial or skipped
+  update preserves entries it did not compare, and `module_commits` entries are
+  cleared only for the modules it refreshed.
+- `--update` now uses the manifest's `project_name` (written by `--new`) when
+  `--name` is absent; before it always used the directory name, which also
+  affected module files written by `--update` for a project created with
+  `--name`.
+- New tests: 14 in `TemplateHistoryTest`, written first (13 failed for the
+  right reasons; the subset-preservation test was added with the fix). Suite
+  251 pass, `git diff --check` clean. ADR 0002 addendum and README updated.
+- Dry runs against `claude_knowledge_base` and `othello` classify every kept
+  file; only `docs/plans/README.md` shows "template changed", and nothing is
+  written.
+
 <!-- Complete this only after verification. Archive the plan according to
 README.md, then reset this file to the empty template. -->

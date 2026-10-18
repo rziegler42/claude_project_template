@@ -2573,6 +2573,219 @@ class UpdateTest(ProjectCase):
         self.assertIn("symlink", err)
 
 
+class TemplateHistoryTest(ProjectCase):
+    """Rebuilding the template as installed from git history (plan 0014)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tpl = os.path.join(self.work, "tpl")
+        for name, value in (("ROOT", self.tpl), ("BASE_DIR", os.path.join(self.tpl, "base")),
+                            ("MODULES_DIR", os.path.join(self.tpl, "modules"))):
+            patcher = unittest.mock.patch.object(install, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        os.makedirs(self.tpl)
+        self.tpl_git("init", "-q")
+        self.tpl_write("base/docs/guide.md", "# REPLACE_WITH_PROJECT_NAME guide\n\nOne.\n\nTwo.\n")
+        self.tpl_write("base/AGENTS.md",
+                       "# Agents\n\nRules.\n\n<!-- @module-slot: agents-guidance -->\n")
+        self.tpl_write("modules/demo/module.json", '{"description": "demo"}\n')
+        self.tpl_write("modules/demo/files/docs/demo.md", "Demo v1\n")
+        self.tpl_write("modules/demo/slots/agents-guidance.md", "Demo guidance v1\n")
+        self.c1 = self.tpl_commit("first")
+
+    def tpl_git(self, *argv):
+        result = subprocess.run(
+            ["git", "-c", "user.name=T", "-c", "user.email=t@example.invalid"] + list(argv),
+            cwd=self.tpl, capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+
+    def tpl_write(self, rel, text):
+        path = os.path.join(self.tpl, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def tpl_commit(self, message):
+        self.tpl_git("add", "-A")
+        self.tpl_git("commit", "-q", "-m", message)
+        return self.tpl_git("rev-parse", "HEAD")
+
+    def make(self, *extra, with_=("--with", "demo")):
+        return run([self.target(), *with_, "--git-name", "Test User",
+                    "--git-email", "tester@users.noreply.example.invalid", *extra])
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def edit_manifest(self, drop=(), **changes):
+        data = self.manifest()
+        data.update(changes)
+        for key in drop:
+            data.pop(key, None)
+        self.write(".template-manifest", json.dumps(data))
+
+    def project_tree(self):
+        tree = read_tree(self.target())
+        tree.pop(".template-manifest")
+        return tree
+
+    def edited_guide(self):
+        self.write("docs/guide.md", self.read("docs/guide.md") + "\nmine\n")
+
+    def test_rebuilt_base_equals_what_new_wrote(self):
+        self.assertEqual(self.make()[0], 0)
+        tree = install.render_template_at(self.c1, ["demo"], "proj")
+        self.assertEqual({k: v.decode() for k, v in tree.items()}, self.project_tree())
+
+    def test_later_module_and_fragment_changes_do_not_alter_the_base(self):
+        self.make()
+        self.tpl_write("modules/demo/files/docs/demo.md", "Demo v2\n")
+        self.tpl_write("modules/demo/slots/agents-guidance.md", "Demo guidance v2\n")
+        c2 = self.tpl_commit("second")
+        tree = install.render_template_at(self.c1, ["demo"], "proj")
+        self.assertEqual({k: v.decode() for k, v in tree.items()}, self.project_tree())
+        self.assertNotEqual(install.render_template_at(c2, ["demo"], "proj"), tree)
+
+    def test_changed_template_file_is_reported_as_changed(self):
+        self.make()
+        self.edited_guide()
+        self.tpl_write("base/docs/guide.md", "# REPLACE_WITH_PROJECT_NAME guide\n\nOne.\n\nThree.\n")
+        self.tpl_commit("second")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("kept docs/guide.md", out)
+        self.assertIn("template changed since %s" % self.c1[:7], out)
+
+    def test_untouched_template_file_is_reported_as_unchanged(self):
+        self.make()
+        self.edited_guide()
+        self.tpl_write("base/AGENTS.md",
+                       "# Agents\n\nNew rules.\n\n<!-- @module-slot: agents-guidance -->\n")
+        self.tpl_commit("second")
+        code, out, err = self.update()
+        self.assertIn("kept docs/guide.md", out)
+        self.assertIn("template unchanged since %s" % self.c1[:7], out.split("docs/guide.md")[1])
+
+    def test_missing_dirty_and_unknown_commits_say_why(self):
+        self.make()
+        self.edited_guide()
+        for changes, reason in (
+            ({"template_commit": None}, "no merge base: no template commit was recorded"),
+            ({"template_commit": self.c1, "template_dirty": True},
+             "no merge base: it was installed from a modified template"),
+            ({"template_commit": "a" * 40, "template_dirty": False},
+             "no merge base: commit " + "a" * 40 + " is not a commit in this template checkout"),
+        ):
+            with self.subTest(reason=reason):
+                self.edit_manifest(**changes)
+                code, out, err = self.update()
+                self.assertEqual(code, 0, err)
+                self.assertIn(reason, out)
+
+    def test_hostile_commit_values_never_reach_git(self):
+        self.make()
+        self.edited_guide()
+        for value in ("--output=x", "HEAD~1", "HEAD", "A" * 40, self.c1[:10], self.c1 + "\n"):
+            with self.subTest(value=value):
+                self.edit_manifest(template_commit=value)
+                with unittest.mock.patch.object(subprocess, "run", side_effect=AssertionError("git ran")):
+                    code, out, err = self.update()
+                self.assertEqual(code, 0, err)
+                self.assertIn("no merge base: the recorded commit is not a commit id", out)
+
+    def test_tree_and_blob_ids_are_not_commits(self):
+        self.make()
+        self.edited_guide()
+        for spec in (self.c1 + "^{tree}", self.c1 + ":base/docs/guide.md"):
+            with self.subTest(spec=spec):
+                self.edit_manifest(template_commit=self.tpl_git("rev-parse", spec))
+                code, out, err = self.update()
+                self.assertEqual(code, 0, err)
+                self.assertIn("is not a commit in this template checkout", out)
+
+    def test_module_added_at_a_later_commit_has_no_base(self):
+        self.assertEqual(self.make(with_=())[0], 0)
+        self.tpl_write("base/docs/guide.md", "# REPLACE_WITH_PROJECT_NAME guide\n\nOne.\n\nThree.\n")
+        c2 = self.tpl_commit("second")
+        code, out, err = run(["--add", "demo", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.manifest()["module_commits"], {"demo": c2})
+        self.assertEqual(self.manifest()["template_commit"], self.c1)
+        self.edited_guide()
+        code, out, err = self.update()
+        self.assertIn("no merge base: module demo was added at a different commit", out)
+
+    def test_block_problem_names_external_and_unknown_blocks(self):
+        block = "<!-- BEGIN module:%s slot:s -->\nx\n<!-- END module:%s slot:s -->\n"
+        self.assertIn("external module ext",
+                      install.block_problem("a\n" + block % ("ext", "ext"), "a\n", {"ext"}))
+        self.assertIn("demo:s is not in the installed template",
+                      install.block_problem("a\n" + block % ("demo", "demo"), "a\n", set()))
+        self.assertIsNone(install.block_problem("a\n" + block % ("demo", "demo"),
+                                                "a\n" + block % ("demo", "demo"), set()))
+
+    def test_explicit_name_is_recorded_and_reused(self):
+        self.assertEqual(self.make("--name", "Alpha")[0], 0)
+        self.assertEqual(self.manifest()["project_name"], "Alpha")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("kept", out)
+
+    def test_legacy_project_without_a_name_says_it_is_assumed(self):
+        self.make()
+        self.edit_manifest(drop=("project_name",))
+        self.edited_guide()
+        code, out, err = self.update()
+        self.assertIn("project name assumed from the directory", out)
+
+    def test_unmerged_file_keeps_its_own_base_across_updates(self):
+        self.make()
+        self.edited_guide()
+        self.tpl_write("base/docs/guide.md", "# REPLACE_WITH_PROJECT_NAME guide\n\nOne.\n\nThree.\n")
+        c2 = self.tpl_commit("second")
+        os.remove(self.path("docs/demo.md"))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("wrote docs/demo.md", out)
+        manifest = self.manifest()
+        self.assertEqual((manifest["template_commit"], manifest["file_bases"]),
+                         (c2, {"docs/guide.md": self.c1}))
+        self.assertNotIn("module_commits", manifest)
+        code, out, err = self.update()
+        self.assertIn("template changed since %s" % self.c1[:7], out)
+        self.write("docs/guide.md", "# proj guide\n\nOne.\n\nThree.\n")
+        os.remove(self.path("docs/demo.md"))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("file_bases", self.manifest())
+
+    def test_updating_one_module_keeps_bases_it_did_not_compare(self):
+        self.tpl_write("modules/other/module.json", '{"description": "other"}\n')
+        self.tpl_write("modules/other/files/docs/other.md", "Other\n")
+        c1 = self.tpl_commit("add other")
+        self.assertEqual(self.make(with_=("--with", "demo,other"))[0], 0)
+        self.edit_manifest(file_bases={"docs/demo.md": c1}, module_commits={"demo": c1, "other": c1})
+        os.remove(self.path("docs/other.md"))
+        code, out, err = self.update("other")
+        self.assertEqual(code, 0, err)
+        self.assertIn("wrote docs/other.md", out)
+        manifest = self.manifest()
+        self.assertEqual(manifest["file_bases"], {"docs/demo.md": c1})
+        self.assertEqual(manifest["module_commits"], {"demo": c1})
+
+    def test_malformed_optional_manifest_keys_are_refused(self):
+        self.make()
+        for changes in ({"file_bases": []}, {"file_bases": {"../x": "a" * 40}},
+                        {"file_bases": {"a": "A" * 40}}, {"module_commits": {"demo": "zz"}},
+                        {"module_commits": []}, {"project_name": 5}):
+            with self.subTest(changes=changes):
+                self.edit_manifest(**changes)
+                code, out, err = self.update()
+                self.assertEqual(code, 2)
+                self.assertIn("malformed", err)
+
+
 class RemoveTest(ProjectCase):
     def remove(self, *argv, extra=()):
         return run(["--remove"] + list(argv) + ["--dir", self.target()] + list(extra))

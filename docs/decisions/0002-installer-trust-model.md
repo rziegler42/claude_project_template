@@ -216,3 +216,23 @@ case-folded. A file the project created, such as a completed plan copied from
 already present, since that text is filled in per plan. `--remove` is unchanged: it
 strips the removed module's blocks from every scanned file, so no orphaned block
 remains. No read or write boundary changes.
+
+## Addendum 2026-10-18: reading the template's history
+
+`--update` now rebuilds the template as it was installed, to tell a file the template
+changed from one only the project changed. The manifest's `template_commit` is
+untrusted input and is used only if it is 40 lowercase hex characters that
+`git rev-parse --verify --quiet <sha>^{commit}` resolves to a commit in the installer's
+own checkout; anything else (an option, a ref name, a tree or blob id) is reported as
+having no base and never reaches `git` again. The history is read with `git ls-tree`
+and `git cat-file --batch`, not `git archive`, so export attributes cannot rewrite or
+drop files. Only plain blobs (modes 100644 and 100755) under `base/` and `modules/`
+are accepted, with normalized paths, no `.git` component, the 16 MiB file cap, and
+file-count and total-size caps. They are written with exclusive, no-follow creation
+into a private temporary directory that is removed afterwards, and rendered with the
+installer's own readers using only the commit's `base/` and `modules/`. The project
+contributes only the manifest's module names and the project name. The step is
+read-only: nothing in the project changes. The new optional manifest keys
+`project_name`, `module_commits` and `file_bases` are validated on load (names,
+40-hex commits or null, safe relative paths, at most 10000 entries) and are ignored by
+older installers.

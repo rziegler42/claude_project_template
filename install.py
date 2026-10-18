@@ -23,6 +23,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.realpath(__file__))
 BASE_DIR = os.path.join(ROOT, "base")
@@ -53,6 +54,11 @@ HINT_MAX = 200
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+SHA_RE = re.compile(r"^[0-9a-f]{40}\Z")
+OBJECT_RE = re.compile(rb"^[0-9a-f]{40,64}\Z")
+BASE_MAX_FILES = 4096
+BASE_MAX_BYTES = 64 * 1024 * 1024
+MANIFEST_MAP_MAX = 10000
 
 
 class InstallError(Exception):
@@ -600,9 +606,9 @@ def apply_slots(text, order, fragments, relpath="<file>"):
     return text, used, set(markers)
 
 
-def assemble(module_names, modules):
+def assemble(module_names, modules, base_dir=None):
     """Build the output tree {relpath: bytes} for base plus the given modules."""
-    tree = collect_tree(BASE_DIR)
+    tree = collect_tree(base_dir or BASE_DIR)
     owners = {path: "base" for path in tree}
     folded = {path.casefold(): path for path in tree}
     for name in module_names:
@@ -768,6 +774,124 @@ def template_state():
         return None, None
     dirty = bool(git(["status", "--porcelain"], cwd=ROOT, check=False).stdout.strip())
     return commit.stdout.strip(), dirty
+
+
+class NoBase(Exception):
+    """The template as installed cannot be rebuilt; the message says why."""
+
+
+def git_bytes(args, data=None):
+    try:
+        result = subprocess.run(
+            ["git"] + GIT_SAFE + args, cwd=ROOT, env=git_env(), input=data,
+            capture_output=True, check=False,
+        )
+    except OSError as exc:
+        raise NoBase("git cannot run: %s" % exc)
+    if result.returncode:
+        raise NoBase("git %s failed" % args[0])
+    return result.stdout
+
+
+def verified_commit(sha):
+    """Return `sha` if it names a commit in the template checkout, else raise NoBase."""
+    if not isinstance(sha, str) or not SHA_RE.match(sha):
+        raise NoBase("the recorded commit is not a commit id")
+    try:
+        found = git_bytes(["rev-parse", "--verify", "--quiet", sha + "^{commit}"])
+    except NoBase:
+        found = b""
+    if found.strip().decode("ascii", "replace") != sha:
+        raise NoBase("commit %s is not a commit in this template checkout" % sha)
+    return sha
+
+
+def read_template_at(sha):
+    """Map path -> bytes of `base/` and `modules/` at a commit; regular files only.
+
+    Read with `ls-tree` and `cat-file`, never `archive`, so export attributes in
+    the history cannot rewrite or drop files.
+    """
+    listing = git_bytes(["ls-tree", "-r", "-z", sha, "--", "base", "modules"])
+    wanted = []
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, raw = entry.partition(b"\t")
+        try:
+            mode, kind, obj = meta.split(b" ")
+            rel = raw.decode("utf-8")
+        except ValueError:
+            raise NoBase("the template tree has an entry that cannot be read")
+        parts = rel.split("/")
+        if (kind != b"blob" or mode not in (b"100644", b"100755") or not OBJECT_RE.match(obj)
+                or parts[0] not in ("base", "modules") or "" in parts or ".." in parts
+                or "." in parts or any(part.casefold() == ".git" for part in parts)):
+            raise NoBase("the template tree has an entry that is not a plain file: %s" % rel)
+        wanted.append((rel, obj))
+    if len(wanted) > BASE_MAX_FILES:
+        raise NoBase("the template tree has too many files")
+    blobs = git_bytes(["cat-file", "--batch"], b"".join(obj + b"\n" for _, obj in wanted))
+    if len(blobs) > BASE_MAX_BYTES:
+        raise NoBase("the template tree is too large")
+    files = {}
+    at = 0
+    for rel, obj in wanted:
+        end = blobs.find(b"\n", at)
+        header = blobs[at:end].split(b" ") if end >= 0 else []
+        if len(header) != 3 or header[0] != obj or header[1] != b"blob" or not header[2].isdigit():
+            raise NoBase("the template tree has an object that cannot be read: %s" % rel)
+        size = int(header[2])
+        if size > MAX_FILE_BYTES or end + 1 + size > len(blobs):
+            raise NoBase("the template tree has a file that is too large: %s" % rel)
+        files[rel] = blobs[end + 1:end + 1 + size]
+        at = end + 1 + size + 1
+    return files
+
+
+def render_template_at(commit, module_names, name):
+    """Rebuild the tree `--new` would have written at `commit` for these modules.
+
+    Only the commit's own `base/` and `modules/` are used; from the project only
+    the module names and the project name come in.
+    """
+    files = read_template_at(verified_commit(commit))
+    with tempfile.TemporaryDirectory(prefix="template-base-") as tmp:
+        try:
+            for rel, data in files.items():
+                dest = os.path.join(tmp, *rel.split("/"))
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                             | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+        except OSError as exc:
+            raise NoBase("the template cannot be unpacked: %s" % (exc.strerror or exc))
+        try:
+            modules = load_modules(os.path.join(tmp, "modules"))
+            for module in module_names:
+                if module not in modules:
+                    raise NoBase("module %s is not in commit %s" % (module, commit[:7]))
+            tree = assemble(resolve(module_names, modules), modules, os.path.join(tmp, "base"))
+            substitute(tree, name)
+        except InstallError as exc:
+            raise NoBase("it cannot be rebuilt: %s" % exc)
+    return tree
+
+
+def block_problem(current, base_text, externals):
+    """Why a project file's module blocks rule out using `base_text` as its base, or None."""
+    try:
+        _, have = strip_blocks(current)
+        _, then = strip_blocks(base_text)
+    except ValueError:
+        return "its block markers are malformed"
+    for module, slot in sorted(have):
+        if module in externals:
+            return "it holds a block of the external module %s" % module
+        if (module, slot) not in then:
+            return "block %s:%s is not in the installed template" % (module, slot)
+    return None
 
 
 def require_printable(value, what):
@@ -1016,6 +1140,34 @@ def validate_external_modules(value, builtin):
         raise InstallError("%s has a malformed external_modules entry" % MANIFEST)
 
 
+def safe_relpath(rel):
+    if not isinstance(rel, str) or not rel or len(rel) > 512 or not rel.isprintable():
+        return False
+    parts = rel.split("/")
+    return not (rel.startswith("/") or "" in parts or "." in parts or ".." in parts
+                or any(part.casefold() == ".git" for part in parts))
+
+
+def validate_optional_keys(manifest, builtin):
+    """Check the keys older manifests lack: project_name, module_commits, file_bases."""
+    name = manifest.get("project_name")
+    commits = manifest.get("module_commits")
+    bases = manifest.get("file_bases")
+    ok = "project_name" not in manifest or (isinstance(name, str) and 0 < len(name) <= 200
+                                            and name.isprintable())
+    if "module_commits" in manifest:
+        ok = ok and isinstance(commits, dict) and len(commits) <= MANIFEST_MAP_MAX and all(
+            isinstance(k, str) and NAME_RE.match(k) and (v is None or (
+                isinstance(v, str) and SHA_RE.match(v)))
+            for k, v in commits.items())
+    if "file_bases" in manifest:
+        ok = ok and isinstance(bases, dict) and len(bases) <= MANIFEST_MAP_MAX and all(
+            safe_relpath(k) and isinstance(v, str) and SHA_RE.match(v) for k, v in bases.items())
+    if not ok:
+        raise InstallError("%s has a malformed project_name, module_commits or file_bases entry"
+                           % MANIFEST)
+
+
 def load_manifest(project, builtin=()):
     if os.path.islink(project):
         raise InstallError("project directory is a symlink: %s" % project)
@@ -1043,6 +1195,7 @@ def load_manifest(project, builtin=()):
         )
     if "external_modules" in manifest:
         validate_external_modules(manifest["external_modules"], builtin)
+    validate_optional_keys(manifest, builtin)
     return manifest
 
 
@@ -1050,7 +1203,7 @@ def external_record(meta):
     return {"module_format": meta["module_format"], "digest": meta["digest"]}
 
 
-def manifest_bytes(module_names, commit, dirty, externals=None):
+def manifest_bytes(module_names, commit, dirty, externals=None, project_name=None):
     payload = {
         "schema": SCHEMA,
         "template_commit": commit,
@@ -1059,6 +1212,8 @@ def manifest_bytes(module_names, commit, dirty, externals=None):
     }
     if externals:
         payload["external_modules"] = externals
+    if project_name:
+        payload["project_name"] = project_name
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -1096,6 +1251,7 @@ def cmd_new(args, out):
     tree[MANIFEST] = manifest_bytes(
         [n for n in names if n in builtin], commit, dirty,
         {n: external_record(modules[n]) for n in names if n in externals},
+        project_name=name,
     )
 
     out("Project: %s" % name)
@@ -1301,6 +1457,13 @@ def cmd_add(args, out):
             + ", ".join("%s:%s" % pair for pair in sorted(missing))
         )
     writes.update(patched)
+    commit, dirty = template_state()
+    added = dict(manifest.get("module_commits", {}))
+    for name in new:
+        if name not in externals:
+            added[name] = commit if commit and not dirty else None
+    if added:
+        manifest["module_commits"] = added
     manifest["modules"] = sorted(n for n in wanted if n not in externals)
     for name in externals:
         recorded[name] = external_record(externals[name])
@@ -1365,6 +1528,62 @@ def differs_from_template(current, shipped):
     return _content(stripped) != _content(shipped.decode("utf-8"))
 
 
+class BaseFinder:
+    """Classify a differing file against the template as it was installed."""
+
+    def __init__(self, manifest, project_name, externals):
+        self.manifest = manifest
+        self.names = list(manifest["modules"])
+        self.project_name = project_name
+        self.externals = externals
+        self.trees = {}
+        self.used = False
+
+    def tree(self, commit):
+        if commit not in self.trees:
+            try:
+                self.trees[commit] = render_template_at(commit, self.names, self.project_name)
+            except NoBase as exc:
+                self.trees[commit] = exc
+        found = self.trees[commit]
+        if isinstance(found, NoBase):
+            raise found
+        return found
+
+    def classify(self, rel, current, shipped):
+        """Return ("changed" | "unchanged", commit) or ("nobase", reason)."""
+        bases = self.manifest.get("file_bases", {})
+        commit = bases.get(rel) or self.manifest.get("template_commit")
+        try:
+            if commit is None:
+                raise NoBase("no template commit was recorded")
+            if rel not in bases:
+                if self.manifest.get("template_dirty"):
+                    raise NoBase("it was installed from a modified template")
+                for module, at in sorted(self.manifest.get("module_commits", {}).items()):
+                    if at != commit:
+                        raise NoBase("module %s was added at a different commit" % module)
+            tree = self.tree(commit)
+            self.used = True
+            if rel not in tree:
+                raise NoBase("the file did not exist at commit %s" % commit[:7])
+            if current is not None and is_text(current) and is_text(tree[rel]):
+                problem = block_problem(current.decode("utf-8"), tree[rel].decode("utf-8"),
+                                        self.externals)
+                if problem:
+                    raise NoBase(problem)
+            return ("changed" if differs_from_template(tree[rel], shipped) else "unchanged", commit)
+        except NoBase as exc:
+            return ("nobase", str(exc))
+
+
+def describe_base(result):
+    status, value = result
+    if status == "nobase":
+        return "no merge base: %s" % value
+    return "template %s since %s" % (status, value[:7])
+
+
 def cmd_update(args, out):
     modules = load_modules()
     project = os.path.abspath(args.dir)
@@ -1397,8 +1616,10 @@ def cmd_update(args, out):
         if external_record(meta) != recorded[name]
     }
     order = sorted(present, key=lambda n: (modules[n]["order"], n))
+    name_recorded = bool(args.name or manifest.get("project_name"))
     project_name = require_printable(
-        args.name or os.path.basename(project.rstrip(os.sep)), "project name"
+        args.name or manifest.get("project_name") or os.path.basename(project.rstrip(os.sep)),
+        "project name",
     )
     skipped = [] if args.skip_unsafe_entries else None
     existing = scan_project(project, skipped)
@@ -1409,26 +1630,33 @@ def cmd_update(args, out):
 
     writes = {}
     kept = []
+    compared = set()
     for name in targets:
         files = collect_tree(os.path.join(modules[name]["path"], "files"))
         substitute(files, project_name)
+        compared.update(files)
         for rel, data in sorted(files.items()):
             if rel in existing:
                 if differs_from_template(existing[rel], data):
-                    kept.append(("kept", rel, "differs from the module's file; not overwriting"))
+                    kept.append(["kept", rel, "differs from the module's file; not overwriting",
+                                 existing[rel], data])
             elif os.path.lexists(os.path.join(project, *rel.split("/"))):
-                kept.append(("kept", rel, "differs from the module's file; not overwriting"))
+                kept.append(["kept", rel, "differs from the module's file; not overwriting",
+                             None, data])
             else:
                 writes[rel] = data
     base_files = collect_tree(BASE_DIR)
     substitute(base_files, project_name)
+    compared.update(base_files)
+    compared.difference_update(rel for rel, _ in skipped or ())
     for rel, data in sorted(base_files.items()):
         if rel in existing and differs_from_template(existing[rel], data):
             if rel == PLAN_FILE:
-                kept.append(("kept", rel, "per-plan file; differs from the template, only an "
-                                       "unmodified copy is updated"))
+                kept.append(["kept", rel, "per-plan file; differs from the template, only an "
+                                          "unmodified copy is updated", None, None])
             else:
-                kept.append(("kept", rel, "differs from the template; not overwriting"))
+                kept.append(["kept", rel, "differs from the template; not overwriting",
+                             existing[rel], data])
 
     files = dict(existing, **writes)
     fresh = {name: modules[name]["slots"] for name in targets}
@@ -1442,7 +1670,8 @@ def cmd_update(args, out):
         if not is_text(data) or not (b"@module-slot:" in data or b"BEGIN module:" in data):
             continue
         if rel.casefold() not in owned:
-            kept.append(("skipped", rel, "project-created file with markers; not patched"))
+            kept.append(["skipped", rel, "project-created file with markers; not patched",
+                         None, None])
             continue
         text = data.decode("utf-8")
         try:
@@ -1464,8 +1693,17 @@ def cmd_update(args, out):
             notes.append("%s:%s is no longer a fragment of the module; block left in place"
                          % (module, slot))
 
+    bases = BaseFinder(manifest, project_name, set(recorded))
+    outcome = {}
+    for entry in kept:
+        if entry[4] is not None:
+            outcome[entry[1]] = bases.classify(entry[1], entry[3], entry[4])
+            entry[2] += "; " + describe_base(outcome[entry[1]])
+    if bases.used and not name_recorded:
+        notes.append("project name assumed from the directory (not recorded in %s); "
+                     "pass --name if it differs" % MANIFEST)
     out("Updating modules: %s" % (", ".join(targets + sorted(changed)) or "none"))
-    for verb, rel, why in kept:
+    for verb, rel, why, _, _ in kept:
         out("  %s %s (%s)" % (verb, rel, why))
     for note in notes:
         out("  note: %s" % note)
@@ -1474,6 +1712,22 @@ def cmd_update(args, out):
         return 0
     commit, dirty = template_state()
     manifest["template_commit"], manifest["template_dirty"] = commit, dirty
+    left = {n: at for n, at in manifest.get("module_commits", {}).items() if n not in targets}
+    if left:
+        manifest["module_commits"] = left
+    else:
+        manifest.pop("module_commits", None)
+    kept_bases = {rel: base for rel, base in manifest.get("file_bases", {}).items()
+                  if rel not in compared}
+    for rel, (status, value) in outcome.items():
+        if status == "changed":
+            kept_bases[rel] = value
+        elif status == "nobase" and rel in manifest.get("file_bases", {}):
+            kept_bases[rel] = manifest["file_bases"][rel]
+    if kept_bases:
+        manifest["file_bases"] = kept_bases
+    else:
+        manifest.pop("file_bases", None)
     for name, meta in changed.items():
         recorded[name] = external_record(meta)
     if recorded:
