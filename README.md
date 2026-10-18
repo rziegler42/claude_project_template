@@ -49,6 +49,35 @@ would write through) or non-regular files, a malformed manifest, and any module
 file under `.git/`. Name placeholders in a module's files are
 filled from the project directory name (or `--name`).
 
+## Update a project
+
+```sh
+cd ../my-project
+~/projects/claude_project_template/install.py --update --dry-run   # preview
+~/projects/claude_project_template/install.py --update             # all modules
+~/projects/claude_project_template/install.py --update graphify    # one module
+~/projects/claude_project_template/install.py --update my_kb=~/projects/my_kb
+```
+
+`--update` (alias `--upgrade`) brings a project created by the installer in line
+with this checkout. It never commits.
+
+- **Blocks** (`BEGIN/END module:<name> slot:<slot>`) are replaced with the module's
+  current fragment, and a fragment with a marker but no block is inserted. Edit
+  outside the blocks: an edit inside one is overwritten.
+- **Module files** that are missing are written. A file that exists and differs is
+  kept and reported, because the manifest records no baseline to tell your edits from
+  an older template.
+- `base/` files are not updated, and no module or orphaned block is removed. A file
+  whose block markers are malformed or were rearranged by hand is left alone and
+  reported.
+- **External modules** are compared by the digest in `.template-manifest`. Without
+  names, a registered store is looked up in the registry; one that is not registered
+  or fails verification is skipped with a note. Name it by registered name or
+  `name=path` to require it. The store is verified read-only, as for `--add`.
+- The manifest's `template_commit` and `template_dirty` are refreshed when anything
+  is written. `--skip-unsafe-entries` works as for `--add`.
+
 ## Use a standalone project as a module
 
 A standalone project can ship a `template-module/` descriptor and be installed as

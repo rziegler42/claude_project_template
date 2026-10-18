@@ -639,6 +639,78 @@ def assemble(module_names, modules):
     return tree
 
 
+BLOCK_RE = re.compile(
+    r"^(?P<open><!-- |# )(?P<kind>BEGIN|END) module:(?P<module>[a-z0-9][a-z0-9_-]*) "
+    r"slot:(?P<slot>[a-z0-9-]+)(?P<close> -->)?\Z"
+)
+
+
+def strip_blocks(text):
+    """Remove every module block; return (text, {(module, slot): body}).
+
+    The inverse of `apply_slots`: the blank line that may follow a block goes
+    with it, whether or not the body still starts with a heading. Raises ValueError on unbalanced, mismatched, or
+    duplicate blocks.
+    """
+    out = []
+    stack = []
+    blocks = {}
+    drop_blank = False
+    for line in text.split("\n"):
+        match = BLOCK_RE.match(line)
+        if match and (match.group("open") == "<!-- ") != (match.group("close") is not None):
+            match = None
+        if not match:
+            if not (drop_blank and not line.strip()):
+                out.append(line)
+            drop_blank = False
+            continue
+        key = (match.group("module"), match.group("slot"))
+        drop_blank = False
+        if match.group("kind") == "BEGIN":
+            stack.append((key, len(out)))
+            continue
+        if not stack or stack[-1][0] != key or key in blocks:
+            raise ValueError("malformed block markers: unbalanced or duplicate %s:%s" % key)
+        _, start = stack.pop()
+        body = out[start:]
+        del out[start:]
+        blocks[key] = "\n".join(body)
+        drop_blank = True
+    if stack:
+        raise ValueError("malformed block markers: %s:%s has no END line" % stack[-1][0])
+    return "\n".join(out), blocks
+
+
+def _content(text):
+    return [line for line in text.split("\n") if line.strip()]
+
+
+def refresh_blocks(text, order, fresh, relpath):
+    """Return (text, blocks, used) with module blocks re-rendered from `fresh`.
+
+    `fresh` maps module -> {slot: fragment}; other blocks keep their recorded
+    body. Refuses (ValueError) a layout that does not render back to itself.
+    """
+    stripped, blocks = strip_blocks(text)
+    recorded = {}
+    for (module, slot), body in blocks.items():
+        recorded.setdefault(module, {})[slot] = body
+
+    def render(fragments):
+        names = list(order) + sorted(m for m in fragments if m not in order)
+        return apply_slots(stripped, names, fragments, relpath)
+
+    same, used, _ = render(recorded)
+    if _content(same) != _content(text) or set(blocks) - used:
+        raise ValueError("block layout differs from the installer's")
+    merged = {module: dict(slots) for module, slots in recorded.items()}
+    for module, slots in fresh.items():
+        merged.setdefault(module, {}).update(slots)
+    new_text, used, _ = render(merged)
+    return new_text, blocks, used
+
+
 # --------------------------------------------------------------------------
 # Git
 
@@ -1165,6 +1237,146 @@ def cmd_add(args, out):
     return 0
 
 
+def load_update_externals(args, entries, recorded, project, builtin, notes):
+    """Load the recorded external modules that `--update` should compare.
+
+    Named modules (registered name or name=path) must load. Without names,
+    every recorded module is looked up in the registry only, and one that is
+    unregistered or fails verification is skipped with a note.
+    """
+    if entries:
+        named = [(n, v) for n, v in entries if n in recorded]
+        named, registered = registered_entries(args, named, builtin)
+        return load_externals(named, project, builtin, registered)
+    if not recorded:
+        return {}
+    try:
+        stores = load_registry(registry_path(args.registry))
+    except InstallError as exc:
+        notes.append("external modules skipped: %s" % exc)
+        return {}
+    loaded = {}
+    for name in sorted(recorded):
+        if name not in stores:
+            notes.append("%s skipped: not registered; name it as %s=PATH to update it" % (name, name))
+            continue
+        try:
+            loaded.update(load_externals([(name, stores[name])], project, builtin, {name}))
+        except InstallError as exc:
+            notes.append("%s skipped: %s" % (name, exc))
+    return loaded
+
+
+def cmd_update(args, out):
+    modules = load_modules()
+    project = os.path.abspath(args.dir)
+    builtin = set(modules)
+    manifest = load_manifest(project, builtin)
+    installed = list(manifest["modules"])
+    recorded = dict(manifest.get("external_modules", {}))
+    entries = parse_entries(args.update)
+    for name, value in entries:
+        if name in recorded:
+            continue
+        if name not in installed:
+            raise InstallError("module %r is not installed in this project" % name)
+        if value is not None:
+            raise InstallError("%s is a built-in module; name=PATH is for external modules" % name)
+        if name not in modules:
+            raise InstallError("module %r is no longer provided by the template" % name)
+    present = [n for n in installed if n in modules]
+    notes = []
+    if entries:
+        targets = [n for n, _ in entries if n not in recorded]
+    else:
+        targets = present
+        for name in installed:
+            if name not in modules:
+                notes.append("%s is no longer provided by the template; left as is" % name)
+    externals = load_update_externals(args, entries, recorded, project, builtin, notes)
+    changed = {
+        name: meta for name, meta in externals.items()
+        if external_record(meta) != recorded[name]
+    }
+    order = sorted(present, key=lambda n: (modules[n]["order"], n))
+    project_name = require_printable(
+        args.name or os.path.basename(project.rstrip(os.sep)), "project name"
+    )
+    skipped = [] if args.skip_unsafe_entries else None
+    existing = scan_project(project, skipped)
+    if skipped:
+        out("Skipped (not read, patched, or written through):")
+        for rel, reason in sorted(skipped):
+            out("  %s (%s)" % (rel, reason))
+
+    writes = {}
+    kept = []
+    for name in targets:
+        files = collect_tree(os.path.join(modules[name]["path"], "files"))
+        substitute(files, project_name)
+        for rel, data in sorted(files.items()):
+            if rel in existing:
+                if existing[rel] != data:
+                    kept.append(rel)
+            elif os.path.lexists(os.path.join(project, *rel.split("/"))):
+                kept.append(rel)
+            else:
+                writes[rel] = data
+
+    files = dict(existing, **writes)
+    fresh = {name: modules[name]["slots"] for name in targets}
+    fresh.update({name: meta["slots"] for name, meta in changed.items()})
+    wanted = {(n, s) for n in fresh for s in fresh[n]}
+    placed = set()
+    seen = set()
+    for rel in sorted(files):
+        data = files[rel]
+        if not is_text(data) or not (b"@module-slot:" in data or b"BEGIN module:" in data):
+            continue
+        text = data.decode("utf-8")
+        try:
+            new_text, blocks, used = refresh_blocks(text, order, fresh, rel)
+        except (ValueError, InstallError) as exc:
+            notes.append("%s: not updated (%s)" % (rel, exc))
+            continue
+        placed |= used
+        seen |= set(blocks)
+        if new_text != text:
+            writes[rel] = new_text.encode("utf-8")
+    for module, slot in sorted(wanted - placed):
+        notes.append("%s:%s has no slot marker in this project; add the marker line by hand"
+                     % (module, slot))
+    for module, slot in sorted(seen):
+        if module in fresh and slot not in fresh[module]:
+            notes.append("%s:%s is no longer a fragment of the module; block left in place"
+                         % (module, slot))
+
+    out("Updating modules: %s" % (", ".join(targets + sorted(changed)) or "none"))
+    for rel in kept:
+        out("  kept %s (differs from the module's file; not overwriting)" % rel)
+    for note in notes:
+        out("  note: %s" % note)
+    if not writes and not changed:
+        out("Nothing to update.")
+        return 0
+    commit, dirty = template_state()
+    manifest["template_commit"], manifest["template_dirty"] = commit, dirty
+    for name, meta in changed.items():
+        recorded[name] = external_record(meta)
+    if recorded:
+        manifest["external_modules"] = recorded
+    writes[MANIFEST] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if args.dry_run:
+        for rel in sorted(writes):
+            out("  would write %s" % rel)
+        out("Dry run: nothing written.")
+        return 0
+    write_tree(project, writes)
+    for rel in sorted(writes):
+        out("  wrote %s" % rel)
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Create or extend a project from the template.")
     parser.add_argument("target", nargs="?", help="directory for the new project")
@@ -1195,10 +1407,15 @@ def build_parser():
         "--add", nargs="+", metavar="MODULE",
         help="add modules (or name=PATH standalone projects) to an existing project",
     )
-    parser.add_argument("--dir", default=".", help="project directory for --add (default: .)")
+    parser.add_argument(
+        "--update", "--upgrade", dest="update", nargs="*", metavar="MODULE",
+        help="refresh installed modules (all, or those named) from this template",
+    )
+    parser.add_argument("--dir", default=".",
+                        help="project directory for --add and --update (default: .)")
     parser.add_argument(
         "--skip-unsafe-entries", action="store_true",
-        help="with --add: skip (and list) symlinks, special files, and oversized files "
+        help="with --add or --update: skip (and list) symlinks, special files, and oversized files "
              "instead of refusing; skipped entries are never read, patched, or written through",
     )
     return parser
@@ -1207,9 +1424,15 @@ def build_parser():
 def main(argv=None, out=print):
     args = build_parser().parse_args(argv)
     try:
-        if args.skip_unsafe_entries and not args.add:
-            raise InstallError("--skip-unsafe-entries applies to --add only")
+        updating = args.update is not None
+        if args.skip_unsafe_entries and not (args.add or updating):
+            raise InstallError("--skip-unsafe-entries applies to --add and --update only")
         registry_modes = (args.register is not None) + (args.unregister is not None)
+        if updating and (registry_modes or args.list or args.add or args.target or args.with_):
+            raise InstallError(
+                "--update cannot be combined with --add, --with, --list, --register, "
+                "--unregister, or a target directory"
+            )
         if registry_modes and (
             registry_modes > 1 or args.list or args.add or args.target or args.with_
         ):
@@ -1223,6 +1446,8 @@ def main(argv=None, out=print):
             return cmd_register(args, out)
         if args.unregister is not None:
             return cmd_unregister(args, out)
+        if updating:
+            return cmd_update(args, out)
         if args.add:
             return cmd_add(args, out)
         if not args.target:

@@ -39,6 +39,9 @@ the template or the template carrying per-project knowledge.
   (Accepted 2026-10-18).
 - The template side is complete, and the root `README.md` documents `name=path`,
   `--register`, the registry, and writing an external module (2026-10-18).
+- `--update` refreshes installed built-in and external modules in a project
+  (2026-10-18, plan [0009](../plans/0009-installer-update.md)); the manifest digest
+  detects a changed store.
 - The sibling `claude_knowledge_base` is a generator that creates stores. Its
   roadmap (`knowledge-base-starter`, candidate 7) expects this integration; it
   will also drop `--add-to` and ship the descriptor. Its owner is implementing the
@@ -95,8 +98,6 @@ plan here.
 
 ## Deferred
 
-- Refreshing an installed external module when its store changes (the manifest
-  digest exists to detect this).
 - Shipping files from a store (`files/`), `requires` between modules, and a
   `module_format` greater than 1.
 - Adopting a store in existing projects such as `game_theory` with `--add`, under

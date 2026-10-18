@@ -2086,6 +2086,328 @@ class RegistryTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.target("second")))
 
 
+class UpdateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        gitconfig = os.path.join(self.work, "global.gitconfig")
+        with open(gitconfig, "w") as handle:
+            handle.write("[user]\n\tname = Sentinel Global\n\temail = %s\n" % SENTINEL_EMAIL)
+        self.saved = dict(os.environ)
+        os.environ["GIT_CONFIG_GLOBAL"] = gitconfig
+        os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.work, "xdg")
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        os.environ.clear()
+        os.environ.update(self.saved)
+
+    def target(self):
+        return os.path.join(self.work, "proj")
+
+    def new(self, with_):
+        return run([self.target(), "--with", with_, "--git-name", "Test User",
+                    "--git-email", "tester@users.noreply.example.invalid"])
+
+    def update(self, *argv):
+        return run(["--update"] + list(argv) + ["--dir", self.target()])
+
+    def path(self, rel):
+        return os.path.join(self.target(), *rel.split("/"))
+
+    def read(self, rel):
+        with open(self.path(rel), encoding="utf-8") as handle:
+            return handle.read()
+
+    def write(self, rel, text):
+        with open(self.path(rel), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def block_lines(self, rel, module, slot):
+        """Return (lines, begin index, end index) of a module block in a file."""
+        lines = self.read(rel).split("\n")
+        begin = [i for i, l in enumerate(lines) if "BEGIN module:%s slot:%s" % (module, slot) in l]
+        end = [i for i, l in enumerate(lines) if "END module:%s slot:%s" % (module, slot) in l]
+        self.assertEqual((len(begin), len(end)), (1, 1))
+        return lines, begin[0], end[0]
+
+    def tamper(self, rel, module, slot):
+        lines, begin, end = self.block_lines(rel, module, slot)
+        lines[begin + 1] = "TAMPERED"
+        self.write(rel, "\n".join(lines))
+
+    def fake_modules(self, slot_text):
+        root = os.path.join(self.work, "fake-modules")
+        os.makedirs(os.path.join(root, "demo", "slots"), exist_ok=True)
+        with open(os.path.join(root, "demo", "module.json"), "w") as handle:
+            json.dump({"description": "demo"}, handle)
+        self.set_fragment(root, slot_text)
+        saved = install.MODULES_DIR
+        install.MODULES_DIR = root
+        self.addCleanup(setattr, install, "MODULES_DIR", saved)
+        return root
+
+    def set_fragment(self, root, text):
+        with open(os.path.join(root, "demo", "slots", "agents-guidance.md"), "w") as handle:
+            handle.write(text)
+
+    def test_unchanged_project_is_a_noop(self):
+        self.assertEqual(self.new(ALL)[0], 0)
+        before = tree_hash(self.target())
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("Nothing to update", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_stale_block_is_replaced(self):
+        self.new("graphify")
+        original = self.read("AGENTS.md")
+        self.tamper("AGENTS.md", "graphify", "agents-guidance")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("AGENTS.md"), original)
+        self.assertIn("AGENTS.md", out)
+
+    def test_removed_block_is_inserted(self):
+        self.new("graphify")
+        lines, begin, end = self.block_lines("AGENTS.md", "graphify", "agents-guidance")
+        body = lines[begin + 1:end]
+        self.write("AGENTS.md", "\n".join(lines[:begin] + lines[end + 1:]))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        lines, begin, end = self.block_lines("AGENTS.md", "graphify", "agents-guidance")
+        self.assertEqual(lines[begin + 1:end], body)
+
+    def test_nested_blocks_survive_a_refresh(self):
+        self.new("cad-freecad")
+        original = self.read("AGENTS.md")
+        self.tamper("AGENTS.md", "cad", "agents-guidance")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("AGENTS.md"), original)
+        self.assertIn("module:cad-freecad slot:agents-cad-tool", original)
+
+    def test_missing_module_file_is_written(self):
+        self.new("graphify")
+        os.remove(self.path(".graphifyignore"))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(self.path(".graphifyignore")))
+        self.assertIn(".graphifyignore", out)
+
+    def test_differing_module_file_is_kept_and_reported(self):
+        self.new("cad")
+        self.write("docs/cad.md", "my edits\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/cad.md"), "my edits\n")
+        self.assertIn("docs/cad.md", out)
+        self.assertIn("not overwriting", out)
+
+    def test_dry_run_writes_nothing(self):
+        self.new("graphify")
+        self.tamper("AGENTS.md", "graphify", "agents-guidance")
+        before = tree_hash(self.target())
+        code, out, err = self.update("--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would write AGENTS.md", out)
+        self.assertIn("Dry run", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_named_module_only(self):
+        self.new("graphify,formal")
+        self.tamper("AGENTS.md", "graphify", "agents-guidance")
+        self.tamper("AGENTS.md", "formal", "agents-guidance")
+        code, out, err = self.update("formal")
+        self.assertEqual(code, 0, err)
+        text = self.read("AGENTS.md")
+        self.assertEqual(text.count("TAMPERED"), 1)
+        lines, begin, end = self.block_lines("AGENTS.md", "graphify", "agents-guidance")
+        self.assertEqual(lines[begin + 1], "TAMPERED")
+
+    def test_module_not_installed_is_an_error(self):
+        self.new("graphify")
+        code, out, err = self.update("cad")
+        self.assertEqual(code, 2)
+        self.assertIn("not installed", err)
+
+    def test_upgrade_is_an_alias(self):
+        self.new("graphify")
+        self.tamper("AGENTS.md", "graphify", "agents-guidance")
+        code, out, err = run(["--upgrade", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("TAMPERED", self.read("AGENTS.md"))
+
+    def test_changed_fragment_is_applied_and_manifest_refreshed(self):
+        root = self.fake_modules("demo v1\n")
+        self.new("demo")
+        self.assertIn("demo v1", self.read("AGENTS.md"))
+        manifest = json.loads(self.read(".template-manifest"))
+        manifest["template_commit"] = "0" * 40
+        self.write(".template-manifest", json.dumps(manifest))
+        self.set_fragment(root, "demo v2\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        text = self.read("AGENTS.md")
+        self.assertIn("demo v2", text)
+        self.assertNotIn("demo v1", text)
+        self.assertNotEqual(json.loads(self.read(".template-manifest"))["template_commit"], "0" * 40)
+
+    def test_dropped_fragment_leaves_its_block_alone(self):
+        root = self.fake_modules("demo v1\n")
+        self.new("demo")
+        os.remove(os.path.join(root, "demo", "slots", "agents-guidance.md"))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("demo v1", self.read("AGENTS.md"))
+        self.assertIn("agents-guidance", out)
+
+    def test_malformed_markers_leave_the_file_alone(self):
+        self.new("graphify")
+        lines, begin, end = self.block_lines("AGENTS.md", "graphify", "agents-guidance")
+        broken = "\n".join(lines[:end] + lines[end + 1:])
+        self.write("AGENTS.md", broken)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("AGENTS.md"), broken)
+        self.assertIn("AGENTS.md", out)
+        self.assertIn("malformed", out)
+
+    def test_edited_heading_is_restored(self):
+        self.new("graphify")
+        original = self.read("AGENTS.md")
+        lines, begin, end = self.block_lines("AGENTS.md", "graphify", "agents-guidance")
+        lines[begin + 1] = "edited heading"
+        self.write("AGENTS.md", "\n".join(lines))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("AGENTS.md"), original)
+
+    def test_projects_grown_by_add_are_stable(self):
+        self.new("claude")
+        for name in ("graphify", "cad", "cad-freecad", "formal"):
+            self.assertEqual(run(["--add", name, "--dir", self.target()])[0], 0)
+        before = tree_hash(self.target())
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("Nothing to update", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    # -- external modules -----------------------------------------------
+
+    def store(self, **kwargs):
+        return make_store(self.work, **kwargs)
+
+    def change_store(self, store, text):
+        with open(os.path.join(store, "template-module", "slots", "agents-guidance.md"), "w") as handle:
+            handle.write(text)
+
+    def recorded_digest(self):
+        return json.loads(self.read(".template-manifest"))["external_modules"]["my_kb"]["digest"]
+
+    def test_external_change_is_applied_by_path(self):
+        store = self.store()
+        self.assertEqual(self.new("graphify,my_kb=" + store)[0], 0)
+        old = self.recorded_digest()
+        self.change_store(store, "## Fixture guidance\n\nNew words.\n")
+        code, out, err = self.update("my_kb=" + store)
+        self.assertEqual(code, 0, err)
+        text = self.read("AGENTS.md")
+        self.assertIn("New words.", text)
+        self.assertNotIn("router.md", text)
+        self.assertNotEqual(self.recorded_digest(), old)
+
+    def test_external_description_change_refreshes_the_digest(self):
+        store = self.store()
+        self.new("my_kb=" + store)
+        old = self.recorded_digest()
+        with open(os.path.join(store, "template-module", "module.json"), "wb") as handle:
+            handle.write(b'{"module_format": 1, "description": "Reworded store"}\n')
+        code, out, err = self.update("my_kb=" + store)
+        self.assertEqual(code, 0, err)
+        self.assertNotEqual(self.recorded_digest(), old)
+
+    def test_external_unchanged_is_a_noop(self):
+        store = self.store()
+        self.new("my_kb=" + store)
+        before = tree_hash(self.target())
+        code, out, err = self.update("my_kb=" + store)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Nothing to update", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_registered_external_is_found_without_naming_it(self):
+        store = self.store()
+        self.assertEqual(run(["--register", store])[0], 0)
+        self.assertEqual(self.new("my_kb")[0], 0)
+        self.change_store(store, "## Fixture guidance\n\nNew words.\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("New words.", self.read("AGENTS.md"))
+
+    def test_unresolvable_external_is_skipped_with_a_note(self):
+        store = self.store()
+        self.new("graphify,my_kb=" + store)
+        self.tamper("AGENTS.md", "graphify", "agents-guidance")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("my_kb", out)
+        self.assertIn("skipped", out)
+        self.assertNotIn("TAMPERED", self.read("AGENTS.md"))
+        self.assertIn("router.md", self.read("AGENTS.md"))
+
+    def test_external_not_installed_is_an_error(self):
+        store = self.store()
+        self.new("graphify")
+        code, out, err = self.update("my_kb=" + store)
+        self.assertEqual(code, 2)
+        self.assertIn("not installed", err)
+
+    def test_hostile_external_store_is_refused(self):
+        store = self.store()
+        self.new("my_kb=" + store)
+        before = tree_hash(self.target())
+        moved = store + "-real"
+        os.rename(store, moved)
+        os.symlink(moved, store)
+        code, out, err = self.update("my_kb=" + store)
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_registered_name_at_another_path_is_refused(self):
+        store = self.store()
+        run(["--register", store])
+        self.new("my_kb")
+        os.makedirs(os.path.join(self.work, "elsewhere"))
+        other = make_store(os.path.join(self.work, "elsewhere"), name="my_kb")
+        code, out, err = self.update("my_kb=" + other)
+        self.assertEqual(code, 2)
+        self.assertIn("registered", err)
+
+    def test_conflicting_modes_are_refused(self):
+        self.new("graphify")
+        for extra in (["--add", "cad"], ["--with", "cad"], ["--list"], ["--unregister", "x"],
+                      ["--register", self.work], [os.path.join(self.work, "other")]):
+            code, out, err = run(["--update", "--dir", self.target()] + extra)
+            self.assertEqual(code, 2, extra)
+
+    def test_not_an_installer_project_is_refused(self):
+        os.makedirs(self.target())
+        code, out, err = self.update()
+        self.assertEqual(code, 2)
+        self.assertIn(".template-manifest", err)
+
+    def test_symlink_in_project_is_refused(self):
+        self.new("graphify")
+        os.symlink(self.work, self.path("link"))
+        code, out, err = self.update()
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+
+
 class ModuleHygieneTest(unittest.TestCase):
     def test_every_fragment_has_a_marker_in_some_file(self):
         modules = install.load_modules()

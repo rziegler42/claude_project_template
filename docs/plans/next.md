@@ -1,6 +1,6 @@
 # Next plan
 
-Status: Approved
+Status: In Progress
 Created: 2026-10-18
 
 ## Goal
