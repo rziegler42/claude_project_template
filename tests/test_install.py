@@ -1048,6 +1048,491 @@ class InteractivePromptTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.work, "demo")))
 
 
+FIXTURE_MODULE = b'{"module_format": 1, "description": "Fixture store"}\n'
+FIXTURE_SLOT = b"## Fixture guidance\n\nRead REPLACE_WITH_MODULE_PATH/router.md.\n"
+# Computed independently of install.py with the spec's digest algorithm.
+FIXTURE_DIGEST = "cf9d227a545469fbe589ff4e65d3a4b4878bd32bd1a3f14341acee82fe7da26d"
+
+
+def tree_hash(root):
+    """Digest of every file under root, dotfiles and .git included."""
+    import hashlib
+    digest = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for filename in sorted(filenames):
+            full = os.path.join(dirpath, filename)
+            digest.update(os.path.relpath(full, root).encode() + b"\0")
+            if os.path.isfile(full):
+                with open(full, "rb") as handle:
+                    digest.update(handle.read())
+            else:
+                digest.update(b"special")
+    return digest.hexdigest()
+
+
+def make_store(parent, name="my_kb", slots=None, module=FIXTURE_MODULE):
+    """Write a valid external-module descriptor and return the store path."""
+    store = os.path.join(parent, name)
+    slot_dir = os.path.join(store, "template-module", "slots")
+    os.makedirs(slot_dir)
+    if module is not None:
+        with open(os.path.join(store, "template-module", "module.json"), "wb") as handle:
+            handle.write(module)
+    for slot, data in (slots if slots is not None else {"agents-guidance": FIXTURE_SLOT}).items():
+        with open(os.path.join(slot_dir, slot + ".md"), "wb") as handle:
+            handle.write(data)
+    return store
+
+
+class ExternalModuleTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        gitconfig = os.path.join(self.work, "global.gitconfig")
+        with open(gitconfig, "w") as handle:
+            handle.write("[user]\n\tname = Sentinel Global\n\temail = %s\n" % SENTINEL_EMAIL)
+        self.saved = dict(os.environ)
+        os.environ["GIT_CONFIG_GLOBAL"] = gitconfig
+        os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        self.addCleanup(self._restore_env)
+        self.builtin = set(install.load_modules())
+
+    def _restore_env(self):
+        os.environ.clear()
+        os.environ.update(self.saved)
+
+    def target(self, name="proj"):
+        return os.path.join(self.work, name)
+
+    def store(self, **kwargs):
+        return make_store(self.work, **kwargs)
+
+    def load(self, value, name="kb", target=None):
+        return install.load_external(name, value, target or self.target(), self.builtin)
+
+    def new(self, with_, name="proj", extra=None):
+        argv = [self.target(name), "--with", with_,
+                "--git-name", "Test User", "--git-email", "tester@users.noreply.example.invalid"]
+        return run(argv + (extra or []))
+
+    def manifest(self, name="proj"):
+        with open(os.path.join(self.target(name), ".template-manifest")) as handle:
+            return json.load(handle)
+
+    def write_manifest(self, data, name="proj"):
+        with open(os.path.join(self.target(name), ".template-manifest"), "w") as handle:
+            json.dump(data, handle)
+
+    # -- parsing and digest -------------------------------------------
+
+    def test_parse_entries(self):
+        self.assertEqual(
+            install.parse_entries(["claude", "kb=~/x", "a=b=c"]),
+            [("claude", None), ("kb", "~/x"), ("a", "b=c")],
+        )
+        for bad in ("=x", "kb="):
+            with self.subTest(bad=bad):
+                with self.assertRaises(install.InstallError):
+                    install.parse_entries([bad])
+
+    def test_digest_matches_pinned_literal(self):
+        self.assertEqual(self.load(self.store())["digest"], FIXTURE_DIGEST)
+        other = make_store(self.work, name="other", slots={"agents-guidance": FIXTURE_SLOT + b"x"})
+        self.assertNotEqual(self.load(other)["digest"], FIXTURE_DIGEST)
+
+    def test_digest_orders_fragments_by_slot_name_not_file_name(self):
+        # Slots "a" and "a-b" sort the other way round by file name ("a-b.md" < "a.md").
+        store = self.store(slots={"a": b"A\n", "a-b": b"B\n"})
+        self.assertEqual(
+            self.load(store)["digest"],
+            "c38f3b1542d3cccda110afc639646990ed4b6fa1332da7a5e9783dac94f99964",
+        )
+
+    # -- loading and verification -------------------------------------
+
+    def test_load_external_valid(self):
+        meta = self.load(self.store())
+        self.assertEqual(meta["description"], "Fixture store")
+        self.assertEqual(meta["module_format"], 1)
+        self.assertTrue(meta["external"])
+        self.assertEqual(meta["requires"], [])
+        self.assertEqual(meta["order"], install.EXTERNAL_ORDER)
+        fragment = meta["slots"]["agents-guidance"]
+        self.assertIn("Read ../my_kb/router.md.", fragment)
+        self.assertNotIn("REPLACE_WITH_MODULE", fragment)
+
+    def test_load_external_absolute_path_when_parents_differ(self):
+        elsewhere = os.path.join(self.work, "elsewhere")
+        os.makedirs(elsewhere)
+        store = make_store(elsewhere)
+        fragment = self.load(store)["slots"]["agents-guidance"]
+        self.assertIn("Read %s/router.md." % os.path.realpath(store), fragment)
+
+    def test_module_name_placeholder_substituted(self):
+        store = self.store(slots={"agents-guidance": b"name is REPLACE_WITH_MODULE_NAME\n"})
+        self.assertIn("name is kb", self.load(store)["slots"]["agents-guidance"])
+
+    def test_tilde_is_expanded(self):
+        store = self.store()
+        os.environ["HOME"] = self.work
+        self.assertEqual(self.load("~/my_kb")["path"], os.path.realpath(store))
+
+    def test_symlinked_ancestor_is_accepted(self):
+        real = os.path.join(self.work, "real")
+        os.makedirs(real)
+        store = make_store(real)
+        link = os.path.join(self.work, "link")
+        os.symlink(real, link)
+        self.assertEqual(self.load(os.path.join(link, "my_kb"))["path"], os.path.realpath(store))
+
+    def assertRefused(self, value, name="kb", target=None, fragment=None):
+        with self.assertRaises(install.InstallError) as ctx:
+            self.load(value, name=name, target=target)
+        if fragment:
+            self.assertIn(fragment, str(ctx.exception))
+        return str(ctx.exception)
+
+    def test_refuses_bad_stores(self):
+        def module(data):
+            return lambda: self.store(module=data)
+
+        def slot(data, name="agents-guidance"):
+            return lambda: self.store(slots={name: data})
+
+        def mutate(fn):
+            def build():
+                store = self.store()
+                fn(store)
+                return store
+            return build
+
+        tdir = lambda store: os.path.join(store, "template-module")
+
+        def link_module(store):
+            path = os.path.join(tdir(store), "module.json")
+            os.rename(path, path + ".real")
+            os.symlink(path + ".real", path)
+
+        def link_slot(store):
+            path = os.path.join(tdir(store), "slots", "agents-guidance.md")
+            os.rename(path, os.path.join(tdir(store), "real.md"))
+            os.symlink(os.path.join(tdir(store), "real.md"), path)
+
+        cases = {
+            "no descriptor": lambda: os.makedirs(os.path.join(self.work, "bare")) or os.path.join(self.work, "bare"),
+            "missing": lambda: os.path.join(self.work, "nope"),
+            "module.json symlink": mutate(link_module),
+            "slot symlink": mutate(link_slot),
+            "slot fifo": mutate(lambda s: os.mkfifo(os.path.join(tdir(s), "slots", "fifo.md"))),
+            "unexpected slots entry": mutate(
+                lambda s: open(os.path.join(tdir(s), "slots", "README.txt"), "w").close()),
+            "bad slot name": slot(b"x\n", name="Bad_Slot"),
+            "module.json not an object": module(b"[]"),
+            "module.json not json": module(b"{"),
+            "unknown key": module(b'{"module_format": 1, "description": "d", "order": 3}'),
+            "mistyped description": module(b'{"module_format": 1, "description": 5}'),
+            "bool format": module(b'{"module_format": true, "description": "d"}'),
+            "unknown format": module(b'{"module_format": 2, "description": "d"}'),
+            "empty description": module(b'{"module_format": 1, "description": ""}'),
+            "long description": module(json.dumps(
+                {"module_format": 1, "description": "d" * 201}).encode()),
+            "multiline description": module(b'{"module_format": 1, "description": "a\\nb"}'),
+            "long hint": module(json.dumps(
+                {"module_format": 1, "description": "d", "hint": "h" * 201}).encode()),
+            "null hint": module(b'{"module_format": 1, "description": "d", "hint": null}'),
+            "non-utf8 fragment": slot(b"\xff\xfe\n"),
+            "nul fragment": slot(b"a\0b\n"),
+            "oversized fragment": slot(b"a" * (64 * 1024 + 1)),
+            "slot marker in fragment": slot(b"x <!-- @module-slot: agents-guidance -->\n"),
+            "begin line in fragment": slot(b"<!-- BEGIN module:x slot:y -->\n"),
+            "end line in fragment": slot(b"text END module:x slot:y\n"),
+        }
+        import shutil
+        for label, build in cases.items():
+            with self.subTest(case=label):
+                for leftover in ("my_kb", "bare"):
+                    shutil.rmtree(os.path.join(self.work, leftover), ignore_errors=True)
+                self.assertRefused(build())
+
+    def test_refuses_seventeen_fragments(self):
+        slots = {"s%02d" % i: b"x\n" for i in range(17)}
+        self.assertRefused(self.store(slots=slots))
+
+    def test_unknown_format_message_names_both_versions(self):
+        store = self.store(module=b'{"module_format": 7, "description": "d"}')
+        message = self.assertRefused(store)
+        self.assertIn("7", message)
+        self.assertIn("supports 1", message)
+
+    def test_refusal_does_not_echo_content(self):
+        store = self.store(module=b'{"module_format": 1, "description": "d", "SECRETVALUE": 1}')
+        self.assertNotIn("SECRETVALUE", self.assertRefused(store))
+
+    def test_refuses_bad_names(self):
+        store = self.store()
+        self.assertRefused(store, name="cad")
+        self.assertRefused(store, name="Bad")
+        self.assertRefused(store, name="-x")
+        self.assertRefused(store, name="kb\n")
+
+    def test_refuses_template_and_target_containment(self):
+        store = self.store()
+        self.assertRefused(os.path.join(install.ROOT, "modules"), fragment="template")
+        self.assertRefused(install.ROOT, fragment="template")
+        self.assertRefused(store, target=store, fragment="target")
+        self.assertRefused(store, target=self.work, fragment="target")
+
+    def test_containment_uses_real_paths_in_both_directions(self):
+        store = self.store()
+        link = os.path.join(self.work, "into-template")
+        os.symlink(os.path.join(install.ROOT, "modules"), link)
+        self.assertRefused(os.path.join(link, "x"), fragment="template")
+        self.assertRefused(os.path.dirname(install.ROOT), fragment="template")
+        self.assertRefused(store, target=os.path.join(store, "inner"), fragment="target")
+        self.assertRefused(os.path.dirname(store), target=store, fragment="target")
+
+    def test_target_case_variant_is_refused(self):
+        store = self.store()
+        variant = self.work.swapcase()
+        if not os.path.exists(variant):
+            self.skipTest("case-sensitive filesystem")
+        self.assertRefused(store, target=variant, fragment="target")
+
+    def test_unreadable_store_directory_is_an_install_error(self):
+        if os.geteuid() == 0:
+            self.skipTest("permissions are not enforced for root")
+        store = self.store()
+        slots = os.path.join(store, "template-module", "slots")
+        os.chmod(slots, 0)
+        self.addCleanup(os.chmod, slots, 0o755)
+        self.assertRefused(store)
+
+    def test_comma_in_store_path_fails_in_with_and_works_in_add(self):
+        store = self.store(name="a,b")
+        code, out, err = self.new("kb=" + store)
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+        self.assertEqual(self.new("graphify")[0], 0)
+        self.assertEqual(self.add("kb=" + store)[0], 0)
+
+    def test_refuses_symlinked_store(self):
+        store = self.store()
+        link = os.path.join(self.work, "linked")
+        os.symlink(store, link)
+        self.assertRefused(link)
+
+    def test_refuses_git_component_in_store_path(self):
+        hidden = os.path.join(self.work, ".git")
+        os.makedirs(hidden)
+        self.assertRefused(make_store(hidden))
+
+    # -- new project --------------------------------------------------
+
+    def test_with_name_path_installs_fragment(self):
+        store = self.store(module=b'{"module_format": 1, "description": "Fixture store",'
+                                  b' "hint": "register me"}\n')
+        code, out, err = self.new("graphify,kb=" + store)
+        self.assertEqual(code, 0, err)
+        agents = read_tree(self.target())["AGENTS.md"]
+        begin = "<!-- BEGIN module:kb slot:agents-guidance -->"
+        self.assertIn(begin, agents)
+        self.assertIn("<!-- END module:kb slot:agents-guidance -->", agents)
+        self.assertIn("Read ../my_kb/router.md.", agents)
+        self.assertLess(agents.index("BEGIN module:graphify slot:agents-guidance"),
+                        agents.index(begin))
+        self.assertIn("kb: register me", out)
+        self.assertIn("@module-slot: agents-guidance", agents)
+
+    def test_fragment_without_trailing_newline_or_with_crlf(self):
+        store = self.store(slots={"agents-guidance": b"line one\r\nlast line"})
+        code, out, err = self.new("kb=" + store)
+        self.assertEqual(code, 0, err)
+        lines = read_tree(self.target())["AGENTS.md"].split("\n")
+        self.assertIn("<!-- END module:kb slot:agents-guidance -->", lines)
+
+    def test_two_external_modules_make_two_blocks(self):
+        one, two = self.store(name="one"), self.store(name="two")
+        code, out, err = self.new("a=%s,b=%s" % (one, two))
+        self.assertEqual(code, 0, err)
+        agents = read_tree(self.target())["AGENTS.md"]
+        self.assertIn("BEGIN module:a slot:agents-guidance", agents)
+        self.assertIn("BEGIN module:b slot:agents-guidance", agents)
+        self.assertLess(agents.index("module:a slot"), agents.index("module:b slot"))
+
+    def test_manifest_records_external(self):
+        store = self.store()
+        self.assertEqual(self.new("graphify,kb=" + store)[0], 0)
+        manifest = self.manifest()
+        self.assertEqual(manifest["modules"], ["graphify"])
+        self.assertEqual(manifest["external_modules"],
+                         {"kb": {"module_format": 1, "digest": FIXTURE_DIGEST}})
+        self.assertNotIn(os.path.basename(store), json.dumps(manifest))
+
+    def test_builtin_only_manifest_has_no_external_key(self):
+        self.assertEqual(self.new("graphify")[0], 0)
+        self.assertNotIn("external_modules", self.manifest())
+
+    def test_dry_run_with_external_writes_nothing(self):
+        store = self.store(module=b'{"module_format": 1, "description": "d", "hint": "h1"}')
+        before = tree_hash(store)
+        code, out, err = self.new("kb=" + store, extra=["--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(self.target()))
+        self.assertIn("would write AGENTS.md", out)
+        self.assertIn("kb: h1", out)
+        self.assertEqual(tree_hash(store), before)
+
+    def test_new_project_refusals_write_nothing(self):
+        one = self.store(name="one")
+        cases = {
+            "duplicate name": "kb=%s,kb=%s" % (one, self.store(name="two")),
+            "same real path twice": "a=%s,b=%s" % (one, one),
+            "slot without marker": "kb=" + self.store(
+                name="orphan", slots={"no-such-slot": b"x\n"}),
+            "unknown bare name": "no_such_module",
+            "builtin name": "cad=" + one,
+        }
+        for label, with_ in cases.items():
+            with self.subTest(case=label):
+                code, out, err = self.new(with_)
+                self.assertEqual(code, 2, out)
+                self.assertFalse(os.path.exists(self.target()))
+
+    def test_store_files_dir_is_never_copied(self):
+        store = self.store()
+        for rel in ("files/top.txt", "template-module/files/inner.txt"):
+            path = os.path.join(store, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as handle:
+                handle.write("x")
+        self.assertEqual(self.new("kb=" + store)[0], 0)
+        tree = read_tree(self.target())
+        self.assertNotIn("top.txt", " ".join(tree))
+        self.assertNotIn("inner.txt", " ".join(tree))
+
+    def test_hostile_store_runs_nothing(self):
+        store = self.store()
+        marker = os.path.join(self.work, "ran")
+        script = os.path.join(self.work, "helper.sh")
+        with open(script, "w") as handle:
+            handle.write("#!/bin/sh\ntouch %s\n" % marker)
+        os.chmod(script, 0o755)
+        os.makedirs(os.path.join(store, ".git"))
+        with open(os.path.join(store, ".git", "config"), "w") as handle:
+            handle.write("[core]\n\tfsmonitor = %s\n\thooksPath = %s\n" % (script, self.work))
+        os.environ["GIT_DIR"] = os.path.join(store, ".git")
+        os.environ["GIT_WORK_TREE"] = store
+        before = tree_hash(store)
+        from unittest import mock
+        with mock.patch.object(install.subprocess, "run", wraps=install.subprocess.run) as spy:
+            self.assertEqual(self.new("kb=" + store)[0], 0)
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(tree_hash(store), before)
+        real_store = os.path.realpath(store)
+        for call in spy.call_args_list:
+            self.assertNotIn(real_store, str(call))
+            self.assertNotIn(store, str(call))
+
+    # -- --add --------------------------------------------------------
+
+    def add(self, *entries, name="proj", extra=None):
+        return run(["--add"] + list(entries) + ["--dir", self.target(name)] + (extra or []))
+
+    def test_add_name_path_to_existing_project(self):
+        self.assertEqual(self.new("graphify")[0], 0)
+        before = read_tree(self.target())["README.md"]
+        code, out, err = self.add("kb=" + self.store())
+        self.assertEqual(code, 0, err)
+        tree = read_tree(self.target())
+        self.assertIn("BEGIN module:kb slot:agents-guidance", tree["AGENTS.md"])
+        self.assertEqual(tree["README.md"], before)
+        self.assertEqual(self.manifest()["external_modules"]["kb"]["digest"], FIXTURE_DIGEST)
+        self.assertEqual(self.manifest()["modules"], ["graphify"])
+
+    def test_add_matches_fresh_install(self):
+        store = self.store()
+        self.assertEqual(self.new("graphify")[0], 0)
+        self.assertEqual(self.add("kb=" + store)[0], 0)
+        self.assertEqual(self.new("graphify,kb=" + store, name="fresh")[0], 0)
+        self.assertEqual(read_tree(self.target())["AGENTS.md"],
+                         read_tree(self.target("fresh"))["AGENTS.md"])
+
+    def test_add_refuses_fragment_without_marker(self):
+        self.assertEqual(self.new("graphify")[0], 0)
+        before = read_tree(self.target())
+        orphan = self.store(slots={"no-such-slot": b"x\n"})
+        code, out, err = self.add("kb=" + orphan)
+        self.assertEqual(code, 2)
+        self.assertEqual(read_tree(self.target()), before)
+
+    def test_add_recorded_external_is_already_installed(self):
+        store = self.store()
+        self.assertEqual(self.new("kb=" + store)[0], 0)
+        before = read_tree(self.target())
+        for entry in ("kb", "kb=" + os.path.join(self.work, "gone")):
+            with self.subTest(entry=entry):
+                code, out, err = self.add(entry)
+                self.assertEqual(code, 0, err)
+                self.assertIn("already installed", out)
+                self.assertEqual(read_tree(self.target()), before)
+
+    def test_add_second_external_keeps_first_entry(self):
+        self.assertEqual(self.new("a=" + self.store(name="one"))[0], 0)
+        first = self.manifest()["external_modules"]["a"]
+        self.assertEqual(self.add("b=" + self.store(name="two"))[0], 0)
+        entries = self.manifest()["external_modules"]
+        self.assertEqual(entries["a"], first)
+        self.assertEqual(sorted(entries), ["a", "b"])
+
+    def test_add_builtin_after_external_does_not_resolve_store_again(self):
+        store = self.store()
+        self.assertEqual(self.new("kb=" + store)[0], 0)
+        import shutil
+        shutil.rmtree(store)
+        code, out, err = self.add("graphify")
+        self.assertEqual(code, 0, err)
+        manifest = self.manifest()
+        self.assertEqual(manifest["modules"], ["graphify"])
+        self.assertIn("kb", manifest["external_modules"])
+        agents = read_tree(self.target())["AGENTS.md"]
+        self.assertEqual(agents.count("BEGIN module:kb slot:agents-guidance"), 1)
+
+    def test_manifest_external_validation(self):
+        good = {"module_format": 1, "digest": FIXTURE_DIGEST}
+        bad = {
+            "not an object": [],
+            "bad name": {"Bad": good},
+            "builtin name": {"cad": good},
+            "unknown format": {"kb": {"module_format": 2, "digest": FIXTURE_DIGEST}},
+            "bool format": {"kb": {"module_format": True, "digest": FIXTURE_DIGEST}},
+            "short digest": {"kb": {"module_format": 1, "digest": "ab"}},
+            "digest with newline": {"kb": {"module_format": 1, "digest": FIXTURE_DIGEST + "\n"}},
+            "name with newline": {"kb\n": good},
+            "uppercase digest": {"kb": {"module_format": 1, "digest": FIXTURE_DIGEST.upper()}},
+            "entry not an object": {"kb": "x"},
+        }
+        self.assertEqual(self.new("graphify")[0], 0)
+        base = self.manifest()
+        for label, value in bad.items():
+            with self.subTest(case=label):
+                self.write_manifest(dict(base, external_modules=value))
+                code, out, err = self.add("cad")
+                self.assertEqual(code, 2, out)
+        self.write_manifest(dict(base, external_modules={"kb": good}))
+        self.assertEqual(self.add("cad")[0], 0)
+
+    def test_add_skip_unsafe_entries_with_external(self):
+        self.assertEqual(self.new("graphify")[0], 0)
+        os.symlink(self.work, os.path.join(self.target(), "linked"))
+        self.assertEqual(self.add("kb=" + self.store())[0], 2)
+        code, out, err = self.add("kb=" + self.store(name="again"),
+                                  extra=["--skip-unsafe-entries"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("linked", out)
+
+
 class ModuleHygieneTest(unittest.TestCase):
     def test_every_fragment_has_a_marker_in_some_file(self):
         modules = install.load_modules()

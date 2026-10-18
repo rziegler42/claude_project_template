@@ -2,14 +2,18 @@
 """Create or extend a project from base/ plus opt-in modules.
 
 Usage:
-  install.py <target> [--with a,b] [--name N] [--dry-run]
+  install.py <target> [--with a,b,name=PATH] [--name N] [--dry-run]
              [--git-name N --git-email E | --use-global-git-identity]
   install.py --list
-  install.py --add <module>... [--dir DIR]
+  install.py --add <module|name=PATH>... [--dir DIR]
+
+`name=PATH` installs the slot fragments of a standalone project that ships a
+`template-module/` descriptor; see docs/specs/external-modules.md.
 
 Standard library only (Python 3.9+). See docs/decisions/0001-*.md.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -24,6 +28,15 @@ MANIFEST = ".template-manifest"
 SCHEMA = 1
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+EXT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}\Z")
+DESCRIPTOR_DIR = "template-module"
+MODULE_FORMATS = (1,)
+EXTERNAL_ORDER = 1000000
+DESCRIPTION_MAX = 200
+FRAGMENT_MAX_BYTES = 64 * 1024
+FRAGMENT_MAX_COUNT = 16
+FRAGMENT_FORBIDDEN = ("@module-slot:", "BEGIN module:", "END module:")
 SLOT_RE = re.compile(
     r"^(?P<open><!--|#)\s*@module-slot:\s*(?P<slot>[a-z0-9-]+)\s*(?P<close>-->)?\s*$"
 )
@@ -98,6 +111,160 @@ def load_modules(modules_dir=None):
         meta.update(name=name, path=path, slots=slots)
         modules[name] = meta
     return modules
+
+
+def parse_entries(parts):
+    """Split `--with`/`--add` parts into (name, value or None) on the first `=`."""
+    entries = []
+    for part in parts:
+        name, sep, value = part.partition("=")
+        if sep and (not name or not value):
+            raise InstallError("invalid module entry %r (expected name=path)" % part)
+        entries.append((name, value if sep else None))
+    return entries
+
+
+def descriptor_digest(files):
+    """SHA-256 over (relative path, NUL, decimal length, NUL, content) per file."""
+    digest = hashlib.sha256()
+    for rel, data in files:
+        digest.update(rel.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0" + data)
+    return digest.hexdigest()
+
+
+def real_directory(path, what):
+    if os.path.islink(path) or not os.path.isdir(path):
+        raise InstallError("%s is not a directory (symlinks are not allowed): %s" % (what, path))
+
+
+def is_within(child, parent):
+    """True when `child` is `parent` or inside it, by real path and file identity."""
+    child, parent = os.path.realpath(child), os.path.realpath(parent)
+    if child == parent or child.startswith(parent + os.sep):
+        return True
+    if not os.path.exists(parent):
+        return False
+    probe = child
+    while True:
+        if os.path.exists(probe) and os.path.samefile(probe, parent):
+            return True
+        up = os.path.dirname(probe)
+        if up == probe:
+            return False
+        probe = up
+
+
+def load_external(name, value, target, builtin):
+    """Wrap `read_external` so an OS error on the store is a user-facing error."""
+    try:
+        return read_external(name, value, target, builtin)
+    except OSError as exc:
+        raise InstallError(
+            "module %s: cannot read store: %s" % (name, exc.strerror or exc.__class__.__name__)
+        )
+
+
+def read_external(name, value, target, builtin):
+    """Verify a standalone project read-only and return a module dict for it.
+
+    Reads only `template-module/module.json` and `template-module/slots/*.md`
+    through `read_regular`; nothing in the store is executed and no
+    subprocess touches it.
+    """
+    if not EXT_NAME_RE.match(name):
+        raise InstallError("invalid module name %r" % name)
+    if name in builtin:
+        raise InstallError("%r is a built-in module name and cannot name a store" % name)
+    require_printable(value, "module path")
+    path = os.path.abspath(os.path.expanduser(value))
+    if os.path.islink(path):
+        raise InstallError("module %s: store is a symlink: %s" % (name, path))
+    store = os.path.realpath(path)
+    if is_within(store, ROOT) or is_within(ROOT, store):
+        raise InstallError(
+            "module %s: store must not be, contain, or be inside the template repository" % name
+        )
+    if is_within(store, target) or is_within(target, store):
+        raise InstallError(
+            "module %s: store must not be, contain, or be inside the target project" % name
+        )
+    if any(part.casefold() == ".git" for part in store.split(os.sep)):
+        raise InstallError("module %s: store path may not touch git metadata" % name)
+    real_directory(store, "module %s: store" % name)
+    descriptor = os.path.join(store, DESCRIPTOR_DIR)
+    slot_dir = os.path.join(descriptor, "slots")
+    real_directory(descriptor, "module %s: %s" % (name, DESCRIPTOR_DIR))
+    real_directory(slot_dir, "module %s: %s/slots" % (name, DESCRIPTOR_DIR))
+    raw = read_regular(os.path.join(descriptor, "module.json"), MAX_MANIFEST_BYTES // 16)
+    try:
+        meta = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise InstallError("module %s: module.json is not a valid JSON object" % name)
+    if not isinstance(meta, dict):
+        raise InstallError("module %s: module.json is not a valid JSON object" % name)
+    unknown = set(meta) - {"module_format", "description", "hint"}
+    if unknown:
+        raise InstallError("module %s: unknown module.json keys: %s" % (name, len(unknown)))
+    fmt = meta.get("module_format")
+    if isinstance(fmt, bool) or not isinstance(fmt, int) or fmt not in MODULE_FORMATS:
+        raise InstallError(
+            "module %s: module_format %s is not supported (this installer supports %s)"
+            % (name, fmt if isinstance(fmt, int) and not isinstance(fmt, bool) else "of the wrong type",
+               ", ".join(str(f) for f in MODULE_FORMATS))
+        )
+    for key, required in (("description", True), ("hint", False)):
+        if key not in meta and not required:
+            continue
+        text = meta.get(key)
+        if not (isinstance(text, str) and 0 < len(text) <= DESCRIPTION_MAX and text.isprintable()):
+            raise InstallError(
+                "module %s: %s must be a single printable line of 1-%d characters"
+                % (name, key, DESCRIPTION_MAX)
+            )
+    raw_slots = {}
+    for entry in os.listdir(slot_dir):
+        slot = entry[:-3]
+        if not entry.endswith(".md") or not NAME_RE.match(slot):
+            raise InstallError("module %s: unexpected entry in %s/slots" % (name, DESCRIPTOR_DIR))
+        raw_slots[slot] = read_regular(os.path.join(slot_dir, entry), FRAGMENT_MAX_BYTES)
+    if len(raw_slots) > FRAGMENT_MAX_COUNT:
+        raise InstallError("module %s: more than %d fragments" % (name, FRAGMENT_MAX_COUNT))
+    parent = os.path.realpath(os.path.dirname(os.path.abspath(target)))
+    where = "../" + os.path.basename(store) if os.path.dirname(store) == parent else store
+    slots = {}
+    for slot in sorted(raw_slots):
+        if not is_text(raw_slots[slot]):
+            raise InstallError("module %s: fragment %s is not UTF-8 text" % (name, slot))
+        text = raw_slots[slot].decode("utf-8")
+        if any(mark in text for mark in FRAGMENT_FORBIDDEN):
+            raise InstallError("module %s: fragment %s contains a reserved marker" % (name, slot))
+        slots[slot] = text.replace("REPLACE_WITH_MODULE_NAME", name).replace(
+            "REPLACE_WITH_MODULE_PATH", where
+        )
+    digest = descriptor_digest(
+        [("module.json", raw)] + [("slots/%s.md" % s, raw_slots[s]) for s in sorted(raw_slots)]
+    )
+    return {
+        "name": name, "path": store, "external": True, "description": meta["description"],
+        "hint": meta.get("hint"), "module_format": fmt, "digest": digest, "requires": [],
+        "order": EXTERNAL_ORDER, "harness": False, "slots": slots,
+    }
+
+
+def load_externals(entries, target, builtin):
+    """Load every `name=path` entry; names and real paths must be unique."""
+    loaded, paths = {}, {}
+    for name, value in entries:
+        if name in loaded:
+            raise InstallError("module %s given more than once" % name)
+        meta = load_external(name, value, target, builtin)
+        if meta["path"] in paths:
+            raise InstallError(
+                "modules %s and %s name the same store" % (paths[meta["path"]], name)
+            )
+        paths[meta["path"]] = name
+        loaded[name] = meta
+    return loaded
 
 
 def resolve(selected, modules):
@@ -290,6 +457,8 @@ def assemble(module_names, modules):
     owners = {path: "base" for path in tree}
     folded = {path.casefold(): path for path in tree}
     for name in module_names:
+        if modules[name].get("external"):
+            continue  # a store contributes fragments only; its files are never read
         for path, data in collect_tree(os.path.join(modules[name]["path"], "files")).items():
             if path.casefold() in folded:
                 other = folded[path.casefold()]
@@ -540,7 +709,22 @@ def write_tree(target, tree):
                 pass
 
 
-def load_manifest(project):
+def validate_external_modules(value, builtin):
+    ok = isinstance(value, dict)
+    for name, entry in (value.items() if ok else ()):
+        fmt = entry.get("module_format") if isinstance(entry, dict) else None
+        digest = entry.get("digest") if isinstance(entry, dict) else None
+        ok = (
+            ok and EXT_NAME_RE.match(name) and name not in builtin
+            and isinstance(entry, dict)
+            and not isinstance(fmt, bool) and fmt in MODULE_FORMATS
+            and isinstance(digest, str) and DIGEST_RE.match(digest)
+        )
+    if not ok:
+        raise InstallError("%s has a malformed external_modules entry" % MANIFEST)
+
+
+def load_manifest(project, builtin=()):
     if os.path.islink(project):
         raise InstallError("project directory is a symlink: %s" % project)
     path = os.path.join(project, MANIFEST)
@@ -565,16 +749,24 @@ def load_manifest(project):
             "%s is malformed (expected an object with schema %d and a list of module names)"
             % (MANIFEST, SCHEMA)
         )
+    if "external_modules" in manifest:
+        validate_external_modules(manifest["external_modules"], builtin)
     return manifest
 
 
-def manifest_bytes(module_names, commit, dirty):
+def external_record(meta):
+    return {"module_format": meta["module_format"], "digest": meta["digest"]}
+
+
+def manifest_bytes(module_names, commit, dirty, externals=None):
     payload = {
         "schema": SCHEMA,
         "template_commit": commit,
         "template_dirty": dirty,
         "modules": sorted(module_names),
     }
+    if externals:
+        payload["external_modules"] = externals
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -594,6 +786,13 @@ def cmd_new(args, out):
             % ", ".join(sorted(modules))
         )
         selected = parse_with(answer)
+    entries = parse_entries(selected)
+    externals = load_externals(
+        [(n, v) for n, v in entries if v is not None], target, set(modules)
+    )
+    builtin = set(modules)
+    modules = dict(modules, **externals)
+    selected = [n for n, _ in entries]
     names = resolve(selected, modules)
     tree = assemble(names, modules)
     substitute(tree, name)
@@ -601,7 +800,10 @@ def cmd_new(args, out):
     if not args.dry_run:
         identity = resolve_identity(args, interactive)
     commit, dirty = template_state()
-    tree[MANIFEST] = manifest_bytes(names, commit, dirty)
+    tree[MANIFEST] = manifest_bytes(
+        [n for n in names if n in builtin], commit, dirty,
+        {n: external_record(modules[n]) for n in names if n in externals},
+    )
 
     out("Project: %s" % name)
     out("Target:  %s" % target)
@@ -659,12 +861,19 @@ def cmd_list(args, out):
 def cmd_add(args, out):
     modules = load_modules()
     project = os.path.abspath(args.dir)
-    manifest = load_manifest(project)
+    builtin = set(modules)
+    manifest = load_manifest(project, builtin)
     installed = list(manifest["modules"])
-    wanted = resolve(list(installed) + list(args.add), modules)
+    recorded = dict(manifest.get("external_modules", {}))
+    entries = parse_entries(args.add)
+    # A recorded external module is never re-read: its store may have moved.
+    fresh = [(n, v) for n, v in entries if n not in recorded]
+    externals = load_externals([(n, v) for n, v in fresh if v is not None], project, builtin)
+    modules = dict(modules, **externals)
+    wanted = resolve(list(installed) + [n for n, _ in fresh], modules)
     new = [name for name in wanted if name not in installed]
     if not new:
-        out("Nothing to add: %s already installed." % ", ".join(args.add))
+        out("Nothing to add: %s already installed." % ", ".join(n for n, _ in entries))
         return 0
 
     # Module files: refuse to overwrite anything that differs.
@@ -673,6 +882,8 @@ def cmd_add(args, out):
     )
     writes = {}
     for name in new:
+        if name in externals:
+            continue
         files = collect_tree(os.path.join(modules[name]["path"], "files"))
         substitute(files, project_name)
         for rel, data in files.items():
@@ -709,7 +920,11 @@ def cmd_add(args, out):
             + ", ".join("%s:%s" % pair for pair in sorted(missing))
         )
     writes.update(patched)
-    manifest["modules"] = sorted(wanted)
+    manifest["modules"] = sorted(n for n in wanted if n not in externals)
+    for name in externals:
+        recorded[name] = external_record(externals[name])
+    if recorded:
+        manifest["external_modules"] = recorded
     writes[MANIFEST] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
     out("Adding modules: %s" % ", ".join(new))
@@ -729,7 +944,10 @@ def cmd_add(args, out):
 def build_parser():
     parser = argparse.ArgumentParser(description="Create or extend a project from the template.")
     parser.add_argument("target", nargs="?", help="directory for the new project")
-    parser.add_argument("--with", dest="with_", default="", help="comma-separated modules")
+    parser.add_argument(
+        "--with", dest="with_", default="",
+        help="comma-separated modules; name=PATH installs a standalone project as module 'name'",
+    )
     parser.add_argument("--name", help="project name (default: target directory name)")
     parser.add_argument("--dry-run", action="store_true", help="show what would be written")
     parser.add_argument("--git-name", help="local git user.name for the new repository")
@@ -740,7 +958,10 @@ def build_parser():
         help="inherit the global git identity instead of setting a local one",
     )
     parser.add_argument("--list", action="store_true", help="list available modules")
-    parser.add_argument("--add", nargs="+", metavar="MODULE", help="add modules to an existing project")
+    parser.add_argument(
+        "--add", nargs="+", metavar="MODULE",
+        help="add modules (or name=PATH standalone projects) to an existing project",
+    )
     parser.add_argument("--dir", default=".", help="project directory for --add (default: .)")
     parser.add_argument(
         "--skip-unsafe-entries", action="store_true",
