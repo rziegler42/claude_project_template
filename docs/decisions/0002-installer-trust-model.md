@@ -198,3 +198,10 @@ account, as above. A file changed between the project scan and the delete is
 deleted or overwritten on that basis. An external module's blocks are removed without
 a baseline to compare, so text added inside one is lost. With `--skip-unsafe-entries`
 a skipped file keeps its blocks and the run says so.
+
+## Addendum 2026-10-18: several values for `--with`
+
+`--with` now accepts several space-separated values as well as commas, matching
+`--add`, `--update` and `--remove`. Each value is still split on commas, so the
+rule above is unchanged: a `--with` path containing a comma is split and fails
+closed. No read or write boundary changes.

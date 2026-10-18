@@ -858,10 +858,12 @@ def emit_hints(out, names, modules, dry_run):
         out("  %s: %s" % (name, hint))
 
 
-def parse_with(value):
-    if not value:
-        return []
-    return [part.strip() for part in value.split(",") if part.strip()]
+def parse_with(values):
+    """Names from --with values or a prompt answer: spaces and commas both separate."""
+    names = []
+    for value in values:
+        names += [part.strip() for part in value.split(",") if part.strip()]
+    return names
 
 
 def check_target(target):
@@ -1067,10 +1069,10 @@ def cmd_new(args, out):
     require_printable(name, "project name")
     if not args.with_ and interactive and not args.dry_run:
         answer = ask(
-            "Modules (comma separated, blank for none; available: %s): "
+            "Modules (space or comma separated, blank for none; available: %s): "
             % ", ".join(sorted(modules))
         )
-        selected = parse_with(answer)
+        selected = parse_with(answer.split())
     entries = parse_entries(selected)
     builtin = set(modules)
     entries, registered = registered_entries(args, entries, builtin)
@@ -1565,8 +1567,9 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Create or extend a project from the template.")
     parser.add_argument("target", nargs="?", help="directory for the new project")
     parser.add_argument(
-        "--with", dest="with_", default="",
-        help="comma-separated modules; name=PATH installs a standalone project as module 'name'",
+        "--with", dest="with_", nargs="+", default=[], metavar="MODULE",
+        help="modules for a new project, space- or comma-separated (put the target first); "
+             "name=PATH installs a standalone project as module 'name'",
     )
     parser.add_argument(
         "--name",
@@ -1649,7 +1652,11 @@ def main(argv=None, out=print):
         if args.add:
             return cmd_add(args, out)
         if not args.target:
-            build_parser().error("a target directory is required")
+            build_parser().error(
+                "a target directory is required"
+                + ("; --with takes every following value as a module, so put the target "
+                   "before --with or end the list with --" if args.with_ else "")
+            )
         return cmd_new(args, out)
     except InstallError as exc:
         print("error: %s" % exc, file=sys.stderr)

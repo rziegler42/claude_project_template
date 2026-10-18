@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -112,6 +113,52 @@ class InstallerTest(unittest.TestCase):
         argv += ["--git-name", "Test User", "--git-email", "tester@users.noreply.example.invalid"]
         argv += extra or []
         return run(argv)
+
+    # -- consistent multi-item options (plan 0011) --------------------
+
+    def created_modules(self):
+        with open(os.path.join(self.target(), ".template-manifest")) as handle:
+            return json.load(handle)["modules"]
+
+    def new_argv(self, *with_args):
+        return [self.target(), "--with", *with_args,
+                "--git-name", "Test User", "--git-email", "tester@users.noreply.example.invalid"]
+
+    def test_with_forms_select_the_same_modules(self):
+        forms = (("claude,graphify",), ("claude", "graphify"), ("claude,", "graphify"))
+        for index, form in enumerate(forms):
+            with self.subTest(form=form):
+                code, out, err = run([self.target("p%d" % index), *self.new_argv(*form)[1:]])
+                self.assertEqual(code, 0, err)
+                with open(os.path.join(self.target("p%d" % index), ".template-manifest")) as handle:
+                    self.assertEqual(json.load(handle)["modules"], ["claude", "graphify"])
+
+    def test_with_mixes_spaces_and_commas_in_order(self):
+        code, out, err = run(self.new_argv("graphify,claude", "cad"))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.created_modules()), ["cad", "claude", "graphify"])
+
+    def test_with_help_uses_module_placeholder(self):
+        text = install.build_parser().format_help()
+        self.assertIn("--with MODULE [MODULE ...]", text)
+        self.assertNotIn("WITH_", text)
+
+    def test_target_swallowed_by_with_gets_ordering_hint(self):
+        argv = ["--with", "claude", self.target(), "--git-name", "Test User",
+                "--git-email", "tester@users.noreply.example.invalid"]
+        captured = io.StringIO()
+        with unittest.mock.patch("sys.stderr", captured), self.assertRaises(SystemExit) as raised:
+            install.main(argv, out=lambda line: None)
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("before --with", captured.getvalue())
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_with_still_conflicts_with_other_modes(self):
+        for mode in (["--update"], ["--remove", "claude"], ["--register", self.work]):
+            with self.subTest(mode=mode):
+                code, out, err = run(mode + ["--with", "claude", "graphify"])
+                self.assertEqual(code, 2)
+                self.assertIn("--with", err)
 
     # -- structure ----------------------------------------------------
 

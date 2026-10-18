@@ -14,7 +14,13 @@ only), and git.
 ./install.py ../my-project --with cad-freecad,graphify \
     --git-name "Your Name" --git-email "id+user@users.noreply.github.com"
 ./install.py ../my-project --with cad --dry-run       # preview only
+./install.py ../my-project --with cad-freecad graphify   # space-separated works too
 ```
+
+- `--with`, `--add`, `--update` and `--remove` take several modules separated by
+  spaces. `--with` also accepts commas. Put the target before `--with` (or end the
+  list with `--`, as in `--with cad graphify -- ../my-project`), because `--with`
+  reads every following value as a module.
 
 - The project name is the target directory name unless `--name` is given.
 - The target must not exist or be an empty directory, and must not be inside
