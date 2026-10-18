@@ -2772,12 +2772,270 @@ class TemplateHistoryTest(ProjectCase):
         self.assertIn("wrote docs/other.md", out)
         manifest = self.manifest()
         self.assertEqual(manifest["file_bases"], {"docs/demo.md": c1})
-        self.assertEqual(manifest["module_commits"], {"demo": c1})
+        self.assertEqual(manifest["module_commits"], {"demo": c1, "other": c1})
+        self.assertEqual(manifest["template_commit"], c1)
+        self.assertIn("partial update", out)
+
+    # -- --update --merge --------------------------------------------
+
+    OLD_PLAN = "# Old plan\n\n<!-- @module-slot: plan-discovery -->\n"
+    GUIDE = "# REPLACE_WITH_PROJECT_NAME guide\n\nline-a\n\nline-b\n\nline-c\n\nline-d\n\nline-e\n"
+
+    def merge_project(self):
+        """A project whose base guide has lines far enough apart to merge cleanly."""
+        self.tpl_write("base/docs/guide.md", self.GUIDE)
+        self.tpl_write("base/docs/plans/next.md", "# REPLACE_WITH_PLAN_TITLE\n\nStatus: Empty\n")
+        self.c1 = self.tpl_commit("merge base")
+        self.assertEqual(self.make()[0], 0)
+
+    def template_guide(self, old, new):
+        self.tpl_write("base/docs/guide.md", self.GUIDE.replace(old, new))
+        return self.tpl_commit("template edit")
+
+    def merge(self, *argv):
+        return self.update("--merge", *argv)
+
+    def test_merge_option_is_only_for_update(self):
+        for argv in (["--merge", self.target()], ["--add", "demo", "--merge"]):
+            with self.subTest(argv=argv):
+                code, out, err = run(argv)
+                self.assertEqual(code, 2)
+                self.assertIn("--merge", err)
+
+    def test_report_alone_never_writes_a_merge(self):
+        self.merge_project()
+        self.template_guide("line-a", "line-a new")
+        before = tree_hash(self.target())
+        code, out, err = self.update()
+        self.assertIn("kept docs/guide.md", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_unmodified_file_takes_the_new_template_text(self):
+        self.merge_project()
+        self.template_guide("line-a", "line-a new")
+        code, out, err = self.merge()
+        self.assertEqual(code, 0, err)
+        self.assertIn("updated docs/guide.md", out)
+        self.assertEqual(self.read("docs/guide.md"), self.GUIDE.replace("line-a", "line-a new")
+                         .replace("REPLACE_WITH_PROJECT_NAME", "proj"))
+
+    def test_edits_that_do_not_overlap_are_merged(self):
+        self.merge_project()
+        self.write("docs/guide.md", self.read("docs/guide.md").replace("line-e", "line-e mine"))
+        self.template_guide("line-a", "line-a new")
+        code, out, err = self.merge()
+        self.assertEqual(code, 0, err)
+        self.assertIn("merged docs/guide.md", out)
+        text = self.read("docs/guide.md")
+        self.assertIn("line-a new", text)
+        self.assertIn("line-e mine", text)
+        self.assertNotIn("<<<<<<<", text)
+
+    def test_overlapping_edits_leave_the_file_alone_and_keep_its_base(self):
+        self.merge_project()
+        mine = self.read("docs/guide.md").replace("line-a", "line-a mine")
+        self.write("docs/guide.md", mine)
+        c2 = self.template_guide("line-a", "line-a new")
+        os.remove(self.path("docs/demo.md"))
+        code, out, err = self.merge()
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict docs/guide.md", out)
+        self.assertEqual(self.read("docs/guide.md"), mine)
+        manifest = self.manifest()
+        self.assertEqual((manifest["template_commit"], manifest["file_bases"]),
+                         (c2, {"docs/guide.md": self.c1}))
+
+    def test_file_without_a_base_is_left_alone(self):
+        self.merge_project()
+        self.template_guide("line-a", "line-a new")
+        self.edit_manifest(template_commit=None)
+        before = self.read("docs/guide.md")
+        code, out, err = self.merge()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/guide.md"), before)
+        self.assertIn("no merge base", out)
+
+    def test_active_plan_is_only_replaced_when_unmodified(self):
+        self.merge_project()
+        self.tpl_write("base/docs/plans/next.md",
+                       "# REPLACE_WITH_PLAN_TITLE\n\nStatus: Empty\nNew line\n")
+        self.tpl_commit("plan template")
+        code, out, err = self.merge()
+        self.assertIn("updated docs/plans/next.md", out)
+        self.assertIn("New line", self.read("docs/plans/next.md"))
+        self.write("docs/plans/next.md", "# My plan\n\nStatus: Proposed\nNew line\n")
+        self.tpl_write("base/docs/plans/next.md",
+                       "# REPLACE_WITH_PLAN_TITLE\n\nStatus: Empty\nNewer line\n")
+        self.tpl_commit("plan template again")
+        code, out, err = self.merge()
+        self.assertEqual(self.read("docs/plans/next.md"),
+                         "# My plan\n\nStatus: Proposed\nNew line\n")
+
+    def test_dry_run_merge_writes_nothing_and_a_second_run_is_a_noop(self):
+        self.merge_project()
+        self.write("docs/guide.md", self.read("docs/guide.md").replace("line-e", "line-e mine"))
+        self.template_guide("line-a", "line-a new")
+        before = tree_hash(self.target())
+        code, out, err = self.merge("--dry-run")
+        self.assertIn("merged docs/guide.md", out)
+        self.assertIn("would write docs/guide.md", out)
+        self.assertEqual(tree_hash(self.target()), before)
+        self.assertEqual(self.merge()[0], 0)
+        merged = tree_hash(self.target())
+        code, out, err = self.merge()
+        self.assertIn("Nothing to update", out)
+        self.assertEqual(tree_hash(self.target()), merged)
+        self.assertNotIn("file_bases", self.manifest())
+
+    def test_file_that_already_has_the_template_change_is_reported_current(self):
+        self.merge_project()
+        self.template_guide("line-a", "line-a new")
+        self.write("docs/guide.md", self.read("docs/guide.md").replace("line-a", "line-a new") + "\nmine\n")
+        before = tree_hash(self.target())
+        code, out, err = self.merge()
+        self.assertIn("current docs/guide.md (already contains the template's changes)", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_project_created_files_are_never_merged(self):
+        self.merge_project()
+        self.write("docs/plans/0001-old.md", self.OLD_PLAN)
+        self.template_guide("line-a", "line-a new")
+        code, out, err = self.merge()
+        self.assertEqual(self.read("docs/plans/0001-old.md"), self.OLD_PLAN)
+        self.assertIn("skipped docs/plans/0001-old.md", out)
+
+    def test_merge_needs_a_recorded_or_given_project_name(self):
+        self.merge_project()
+        self.template_guide("line-a", "line-a new")
+        self.edit_manifest(drop=("project_name",))
+        before = tree_hash(self.target())
+        code, out, err = self.merge()
+        self.assertEqual(code, 2)
+        self.assertIn("--name", err)
+        self.assertEqual(tree_hash(self.target()), before)
+        code, out, err = self.merge("--name", "proj")
+        self.assertEqual(code, 0, err)
+        self.assertIn("updated docs/guide.md", out)
+
+    def test_partial_update_does_not_advance_the_base(self):
+        self.tpl_write("modules/other/module.json", '{"description": "other"}\n')
+        self.tpl_write("modules/other/files/docs/other.md",
+                       "o1\n\no2\n\no3\n\no4\n\no5\n")
+        c1 = self.tpl_commit("add other")
+        self.assertEqual(self.make(with_=("--with", "demo,other"))[0], 0)
+        self.write("docs/other.md", self.read("docs/other.md").replace("o5", "o5 mine"))
+        self.tpl_write("modules/other/files/docs/other.md",
+                       "o1 C2\n\no2\n\no3\n\no4\n\no5\n")
+        self.tpl_commit("second")
+        os.remove(self.path("docs/demo.md"))
+        code, out, err = self.update("demo")
+        self.assertIn("wrote docs/demo.md", out)
+        self.assertEqual(self.manifest()["template_commit"], c1)
+        self.tpl_write("modules/other/files/docs/other.md",
+                       "o1 C2\n\no2\n\no3 C3\n\no4\n\no5\n")
+        self.tpl_commit("third")
+        code, out, err = self.merge()
+        self.assertEqual(code, 0, err)
+        text = self.read("docs/other.md")
+        for expected in ("o1 C2", "o3 C3", "o5 mine"):
+            self.assertIn(expected, text)
+
+    def test_file_with_no_base_stays_without_one_after_the_commit_advances(self):
+        self.merge_project()
+        self.edit_manifest(template_dirty=True)
+        self.write("docs/guide.md", self.read("docs/guide.md").replace("line-e", "line-e mine"))
+        self.template_guide("line-a", "line-a new")
+        os.remove(self.path("docs/demo.md"))
+        code, out, err = self.update()
+        self.assertIn("installed from a modified template", out)
+        self.assertEqual(self.manifest()["file_bases"], {"docs/guide.md": None})
+        self.edit_manifest(template_dirty=False)
+        self.template_guide("line-b", "line-b new")
+        before = self.read("docs/guide.md")
+        code, out, err = self.merge()
+        self.assertEqual(self.read("docs/guide.md"), before)
+        self.assertIn("no merge base", out)
+
+    def test_non_string_commits_are_reported_not_crashed_on(self):
+        self.make()
+        self.edited_guide()
+        for value in ([1], {"a": 1}, True, 5.5, 0, ""):
+            with self.subTest(value=value):
+                self.edit_manifest(template_commit=value)
+                code, out, err = self.update()
+                self.assertEqual(code, 0, err)
+                self.assertIn("no merge base", out)
+
+    def test_block_of_a_module_the_template_dropped_is_not_lost_by_merge(self):
+        self.make()
+        self.write("AGENTS.md", self.read("AGENTS.md").replace("Rules.", "Rules mine."))
+        shutil.rmtree(os.path.join(self.tpl, "modules", "demo"))
+        self.tpl_write("base/AGENTS.md",
+                       "# Agents\n\nNew rules.\n\n<!-- @module-slot: agents-guidance -->\n")
+        self.tpl_commit("drop demo")
+        before = self.read("AGENTS.md")
+        code, out, err = self.merge()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("AGENTS.md"), before)
+        self.assertIn("would drop the block demo:agents-guidance", out)
+
+    def test_hostile_old_module_definitions_are_no_base_not_a_crash(self):
+        self.make()
+        self.edited_guide()
+        for name, data in (("module.json", b'{"requires": 5}'),
+                           ("slots/agents-guidance.md", b"\xff\xfe")):
+            with self.subTest(name=name):
+                path = os.path.join(self.tpl, "modules", "demo", *name.split("/"))
+                original = open(path, "rb").read()
+                with open(path, "wb") as handle:
+                    handle.write(data)
+                commit = self.tpl_commit("hostile " + name)
+                with open(path, "wb") as handle:
+                    handle.write(original)
+                self.tpl_commit("restore")
+                self.edit_manifest(template_commit=commit)
+                code, out, err = self.update()
+                self.assertEqual(code, 0, err)
+                self.assertIn("no merge base: it cannot be rebuilt", out)
+
+    def test_oversized_blob_is_refused_before_it_is_read(self):
+        self.make()
+        with unittest.mock.patch.object(install, "MAX_FILE_BYTES", 5):
+            with self.assertRaises(install.NoBase) as caught:
+                install.read_template_at(self.c1)
+        self.assertIn("too large", str(caught.exception))
+
+    def test_installer_must_sit_at_the_top_of_its_checkout(self):
+        self.make()
+        with unittest.mock.patch.object(install, "ROOT", os.path.join(self.tpl, "modules")):
+            with self.assertRaises(install.NoBase) as caught:
+                install.verified_commit(self.c1)
+        self.assertIn("top of a git checkout", str(caught.exception))
+
+    def test_merge_cannot_be_limited_to_named_modules(self):
+        self.merge_project()
+        code, out, err = self.update("demo", "--merge")
+        self.assertEqual(code, 2)
+        self.assertIn("--merge", err)
+
+    def test_merge_rejected_by_block_refresh_is_not_written(self):
+        self.make()
+        self.write("AGENTS.md", self.read("AGENTS.md").replace("Rules.", "Rules mine."))
+        self.tpl_write("base/AGENTS.md",
+                       "# Agents\n\nRules.\n\nMore.\n\n<!-- @module-slot: agents-guidance -->\n")
+        self.tpl_commit("more")
+        before = self.read("AGENTS.md")
+        with unittest.mock.patch.object(install, "refresh_blocks", side_effect=ValueError("bad layout")):
+            code, out, err = self.merge()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("AGENTS.md"), before)
+        self.assertIn("kept AGENTS.md", out)
 
     def test_malformed_optional_manifest_keys_are_refused(self):
         self.make()
         for changes in ({"file_bases": []}, {"file_bases": {"../x": "a" * 40}},
-                        {"file_bases": {"a": "A" * 40}}, {"module_commits": {"demo": "zz"}},
+                        {"file_bases": {"a": "A" * 40}}, {"file_bases": {"a": 5}},
+                        {"module_commits": {"demo": "zz"}},
                         {"module_commits": []}, {"project_name": 5}):
             with self.subTest(changes=changes):
                 self.edit_manifest(**changes)

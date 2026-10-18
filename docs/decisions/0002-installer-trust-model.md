@@ -236,3 +236,37 @@ read-only: nothing in the project changes. The new optional manifest keys
 `project_name`, `module_commits` and `file_bases` are validated on load (names,
 40-hex commits or null, safe relative paths, at most 10000 entries) and are ignored by
 older installers.
+
+## Addendum 2026-10-18: `--update --merge`
+
+`--merge` writes into existing files, still only those the template ships (the owned-file
+rule above), and only in `--update`. Each merge reads three versions: the project's file,
+the template as installed (rebuilt from the recorded commit as described above) and the
+current template. A file equal to its installed version takes the current text. Otherwise
+the three are written to a private temporary directory (exclusive, no-follow creation)
+and combined with `git merge-file -p` run with the safe git options and no repository.
+The result is written only on exit status 0, so a conflict, a binary file or any error
+leaves the file byte-identical, and no conflict markers are ever written. Nothing is
+merged without a base, into a file with an external module's block, into a project-created
+file, or into an edited `docs/plans/next.md`. The merged text then goes through the usual
+block refresh and the usual write path, so the existing swap-window and write-boundary
+properties are unchanged.
+
+Hardening from the adversarial review of the two addenda above: the recorded commit must
+come from the installer's own checkout, and the installer must sit at its top level
+(`git rev-parse --show-toplevel`), so a parent repository's history is never a base.
+`git` runs with `--no-replace-objects` and `GIT_NO_LAZY_FETCH=1`, with a 60-second
+timeout, and object sizes are read with `cat-file --batch-check` before any blob is
+read. A recorded commit whose old module definitions are malformed is reported as having
+no base, not as a crash. A manifest value that is not a string is treated as not a commit
+id. `--update` advances the recorded `template_commit` only after a full run that
+compared every shipped file; a run limited to named modules, or one that skipped a
+shipped path as unsafe, leaves it where it is, and a differing file that had no usable
+base is recorded with a null base so it is never later judged against a commit it did not
+come from. `--merge` cannot be limited to named modules, leaves a file alone when taking
+the template's text would drop a block of an installed module the template no longer
+ships, and does not write a merged text that the block check rejects.
+
+Accepted residual: a project file edited between the scan and the write is overwritten on
+that basis, as for every other patched file; the merge widens that window by the time
+`git merge-file` takes.

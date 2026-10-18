@@ -59,6 +59,7 @@ OBJECT_RE = re.compile(rb"^[0-9a-f]{40,64}\Z")
 BASE_MAX_FILES = 4096
 BASE_MAX_BYTES = 64 * 1024 * 1024
 MANIFEST_MAP_MAX = 10000
+GIT_TIMEOUT = 60
 
 
 class InstallError(Exception):
@@ -781,11 +782,14 @@ class NoBase(Exception):
 
 
 def git_bytes(args, data=None):
+    env = dict(git_env(), GIT_NO_LAZY_FETCH="1")
     try:
         result = subprocess.run(
-            ["git"] + GIT_SAFE + args, cwd=ROOT, env=git_env(), input=data,
-            capture_output=True, check=False,
+            ["git", "--no-replace-objects"] + GIT_SAFE + args, cwd=ROOT, env=env, input=data,
+            capture_output=True, check=False, timeout=GIT_TIMEOUT,
         )
+    except subprocess.TimeoutExpired:
+        raise NoBase("git did not finish in %d seconds" % GIT_TIMEOUT)
     except OSError as exc:
         raise NoBase("git cannot run: %s" % exc)
     if result.returncode:
@@ -797,6 +801,12 @@ def verified_commit(sha):
     """Return `sha` if it names a commit in the template checkout, else raise NoBase."""
     if not isinstance(sha, str) or not SHA_RE.match(sha):
         raise NoBase("the recorded commit is not a commit id")
+    try:
+        top = git_bytes(["rev-parse", "--show-toplevel"]).strip().decode("utf-8", "replace")
+    except NoBase:
+        top = ""
+    if not top or os.path.realpath(top) != os.path.realpath(ROOT):
+        raise NoBase("the installer is not at the top of a git checkout")
     try:
         found = git_bytes(["rev-parse", "--verify", "--quiet", sha + "^{commit}"])
     except NoBase:
@@ -831,7 +841,19 @@ def read_template_at(sha):
         wanted.append((rel, obj))
     if len(wanted) > BASE_MAX_FILES:
         raise NoBase("the template tree has too many files")
-    blobs = git_bytes(["cat-file", "--batch"], b"".join(obj + b"\n" for _, obj in wanted))
+    request = b"".join(obj + b"\n" for _, obj in wanted)
+    sizes = git_bytes(["cat-file", "--batch-check"], request).split(b"\n")
+    total = 0
+    for (rel, obj), line in zip(wanted, sizes):
+        fields = line.split(b" ")
+        if len(fields) != 3 or fields[0] != obj or fields[1] != b"blob" or not fields[2].isdigit():
+            raise NoBase("the template tree has an object that cannot be read: %s" % rel)
+        if int(fields[2]) > MAX_FILE_BYTES:
+            raise NoBase("the template tree has a file that is too large: %s" % rel)
+        total += int(fields[2])
+    if len(sizes) < len(wanted) or total > BASE_MAX_BYTES:
+        raise NoBase("the template tree is too large")
+    blobs = git_bytes(["cat-file", "--batch"], request)
     if len(blobs) > BASE_MAX_BYTES:
         raise NoBase("the template tree is too large")
     files = {}
@@ -874,7 +896,7 @@ def render_template_at(commit, module_names, name):
                     raise NoBase("module %s is not in commit %s" % (module, commit[:7]))
             tree = assemble(resolve(module_names, modules), modules, os.path.join(tmp, "base"))
             substitute(tree, name)
-        except InstallError as exc:
+        except (InstallError, ValueError, TypeError, KeyError, AttributeError) as exc:
             raise NoBase("it cannot be rebuilt: %s" % exc)
     return tree
 
@@ -1162,7 +1184,8 @@ def validate_optional_keys(manifest, builtin):
             for k, v in commits.items())
     if "file_bases" in manifest:
         ok = ok and isinstance(bases, dict) and len(bases) <= MANIFEST_MAP_MAX and all(
-            safe_relpath(k) and isinstance(v, str) and SHA_RE.match(v) for k, v in bases.items())
+            safe_relpath(k) and (v is None or (isinstance(v, str) and SHA_RE.match(v)))
+            for k, v in bases.items())
     if not ok:
         raise InstallError("%s has a malformed project_name, module_commits or file_bases entry"
                            % MANIFEST)
@@ -1553,10 +1576,14 @@ class BaseFinder:
     def classify(self, rel, current, shipped):
         """Return ("changed" | "unchanged", commit) or ("nobase", reason)."""
         bases = self.manifest.get("file_bases", {})
-        commit = bases.get(rel) or self.manifest.get("template_commit")
+        commit = bases[rel] if rel in bases else self.manifest.get("template_commit")
         try:
+            if rel in bases and commit is None:
+                raise NoBase("no merge base was kept for it at the last update")
             if commit is None:
                 raise NoBase("no template commit was recorded")
+            if not isinstance(commit, str):
+                raise NoBase("the recorded commit is not a commit id")
             if rel not in bases:
                 if self.manifest.get("template_dirty"):
                     raise NoBase("it was installed from a modified template")
@@ -1575,6 +1602,92 @@ class BaseFinder:
             return ("changed" if differs_from_template(tree[rel], shipped) else "unchanged", commit)
         except NoBase as exc:
             return ("nobase", str(exc))
+
+
+def merge_text(ours, base, theirs):
+    """Three-way merge of text; the merged bytes, or None on a conflict or an error."""
+    with tempfile.TemporaryDirectory(prefix="template-merge-") as tmp:
+        paths = []
+        for label, data in (("ours", ours), ("base", base), ("theirs", theirs)):
+            path = os.path.join(tmp, label)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            paths.append(path)
+        try:
+            result = subprocess.run(
+                ["git"] + GIT_SAFE + ["merge-file", "-p", "-L", "ours", "-L", "base",
+                                      "-L", "theirs"] + paths,
+                cwd=tmp, env=git_env(), capture_output=True, check=False, timeout=GIT_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def lost_block(ours, theirs):
+    """(module, slot) of a block in `ours` that `theirs` lacks, or None."""
+    try:
+        _, have = strip_blocks(ours.decode("utf-8"))
+        _, want = strip_blocks(theirs.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    missing = sorted(set(have) - set(want))
+    return missing[0] if missing else None
+
+
+def merge_files(kept, outcome, bases, existing, writes, modules, present, project_name,
+                name_recorded):
+    """Merge the template's changes into the differing files `--update` kept.
+
+    A file unmodified since install takes the new template text; a modified one
+    is merged three-way when the edits do not overlap. A conflict, a file with
+    no base, a non-text file, and a changed `docs/plans/next.md` that was edited
+    are left byte-identical. Results are added to `writes`.
+    """
+    theirs_tree = None
+    merged_now = {}
+    for entry in kept:
+        verb, rel = entry[0], entry[1]
+        state = outcome.get(rel)
+        if verb != "kept" or state is None or state[0] != "changed" or rel not in existing:
+            continue
+        if not name_recorded:
+            raise InstallError(
+                "--merge needs the project name, which %s does not record: pass --name" % MANIFEST
+            )
+        if theirs_tree is None:
+            theirs_tree = assemble(resolve(present, modules), modules)
+            substitute(theirs_tree, project_name)
+        if rel not in theirs_tree:
+            continue
+        ours, base, theirs = existing[rel], bases.tree(state[1])[rel], theirs_tree[rel]
+        lost = lost_block(ours, theirs)
+        if lost:
+            entry[2] += "; would drop the block %s:%s, left unchanged" % lost
+            continue
+        if ours == base:
+            merged, verb, why = theirs, "updated", "unmodified since install; took the template's changes"
+        elif rel == PLAN_FILE:
+            continue
+        elif is_text(ours) and is_text(base) and is_text(theirs):
+            merged = merge_text(ours, base, theirs)
+            if merged is None:
+                entry[0], entry[2] = "conflict", ("your edits and the template's changes overlap; "
+                                                   "left unchanged")
+                continue
+            verb, why = "merged", "template changes merged with yours"
+        else:
+            continue
+        if merged != ours:
+            writes[rel] = merged
+        else:
+            verb, why = "current", "already contains the template's changes"
+        entry[0], entry[2] = verb, why
+        merged_now[rel] = (entry, state)
+        outcome[rel] = ("merged", state[1])
+    return merged_now
 
 
 def describe_base(result):
@@ -1653,10 +1766,24 @@ def cmd_update(args, out):
         if rel in existing and differs_from_template(existing[rel], data):
             if rel == PLAN_FILE:
                 kept.append(["kept", rel, "per-plan file; differs from the template, only an "
-                                          "unmodified copy is updated", None, None])
+                                          "unmodified copy is updated", existing[rel], data])
             else:
                 kept.append(["kept", rel, "differs from the template; not overwriting",
                              existing[rel], data])
+
+    bases = BaseFinder(manifest, project_name, set(recorded))
+    outcome = {}
+    for entry in kept:
+        if entry[4] is not None:
+            outcome[entry[1]] = bases.classify(entry[1], entry[3], entry[4])
+            entry[2] += "; " + describe_base(outcome[entry[1]])
+    if bases.used and not name_recorded:
+        notes.append("project name assumed from the directory (not recorded in %s); "
+                     "pass --name if it differs" % MANIFEST)
+    merged_now = {}
+    if args.merge:
+        merged_now = merge_files(kept, outcome, bases, existing, writes, modules, present,
+                                 project_name, name_recorded)
 
     files = dict(existing, **writes)
     fresh = {name: modules[name]["slots"] for name in targets}
@@ -1680,6 +1807,11 @@ def cmd_update(args, out):
             )
         except (ValueError, InstallError) as exc:
             notes.append("%s: not updated (%s)" % (rel, exc))
+            if rel in merged_now:
+                entry, state = merged_now[rel]
+                writes.pop(rel, None)
+                outcome[rel] = state
+                entry[0], entry[2] = "kept", "the merged text was rejected by the block check; left unchanged"
             continue
         placed |= used
         seen |= set(blocks)
@@ -1693,15 +1825,6 @@ def cmd_update(args, out):
             notes.append("%s:%s is no longer a fragment of the module; block left in place"
                          % (module, slot))
 
-    bases = BaseFinder(manifest, project_name, set(recorded))
-    outcome = {}
-    for entry in kept:
-        if entry[4] is not None:
-            outcome[entry[1]] = bases.classify(entry[1], entry[3], entry[4])
-            entry[2] += "; " + describe_base(outcome[entry[1]])
-    if bases.used and not name_recorded:
-        notes.append("project name assumed from the directory (not recorded in %s); "
-                     "pass --name if it differs" % MANIFEST)
     out("Updating modules: %s" % (", ".join(targets + sorted(changed)) or "none"))
     for verb, rel, why, _, _ in kept:
         out("  %s %s (%s)" % (verb, rel, why))
@@ -1710,20 +1833,32 @@ def cmd_update(args, out):
     if not writes and not changed:
         out("Nothing to update.")
         return 0
-    commit, dirty = template_state()
-    manifest["template_commit"], manifest["template_dirty"] = commit, dirty
-    left = {n: at for n, at in manifest.get("module_commits", {}).items() if n not in targets}
-    if left:
-        manifest["module_commits"] = left
+    unread = [r.casefold() for r, _ in skipped or ()]
+    partial = bool(entries) or any(
+        path == r or path.startswith(r + "/") for path in owned for r in unread
+    )
+    if partial:
+        out("  note: partial update; the recorded template commit was not advanced")
+    old_bases = manifest.get("file_bases", {})
+    if partial:
+        # Files this run did not all compare still need their old base, so the
+        # recorded commit stays put; only files merged now no longer need one.
+        kept_bases = {rel: base for rel, base in old_bases.items()
+                      if outcome.get(rel, ("",))[0] != "merged"}
     else:
+        commit, dirty = template_state()
+        manifest["template_commit"], manifest["template_dirty"] = commit, dirty
         manifest.pop("module_commits", None)
-    kept_bases = {rel: base for rel, base in manifest.get("file_bases", {}).items()
-                  if rel not in compared}
-    for rel, (status, value) in outcome.items():
-        if status == "changed":
-            kept_bases[rel] = value
-        elif status == "nobase" and rel in manifest.get("file_bases", {}):
-            kept_bases[rel] = manifest["file_bases"][rel]
+        kept_bases = {rel: base for rel, base in old_bases.items() if rel not in compared}
+        for rel, (status, value) in outcome.items():
+            if rel == PLAN_FILE:
+                continue
+            if status == "changed":
+                kept_bases[rel] = value
+            elif status == "nobase":
+                # Without a stored base the file would be judged against the commit
+                # just recorded, which it never came from: remember that it has none.
+                kept_bases[rel] = old_bases.get(rel)
     if kept_bases:
         manifest["file_bases"] = kept_bases
     else:
@@ -1902,6 +2037,11 @@ def build_parser():
         "--remove", nargs="+", metavar="MODULE",
         help="remove installed modules (blocks, unedited files, manifest entries)",
     )
+    parser.add_argument(
+        "--merge", action="store_true",
+        help="with --update: merge the template's changes into files you edited "
+             "(three-way, against the template as installed); conflicts are left unchanged",
+    )
     parser.add_argument("--dir", default=".",
                         help="project directory for --add, --update and --remove (default: .)")
     parser.add_argument(
@@ -1919,6 +2059,11 @@ def main(argv=None, out=print):
         removing = args.remove is not None
         if args.skip_unsafe_entries and not (args.add or updating or removing):
             raise InstallError("--skip-unsafe-entries applies to --add, --update and --remove only")
+        if args.merge and not updating:
+            raise InstallError("--merge applies to --update only")
+        if args.merge and args.update:
+            raise InstallError("--merge cannot be limited to named modules: "
+                               "it brings every installed module up to date")
         registry_modes = (args.register is not None) + (args.unregister is not None)
         if removing and (
             registry_modes or args.list or args.add or updating or args.target or args.with_

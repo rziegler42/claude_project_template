@@ -92,6 +92,17 @@ with this checkout. It never commits.
   git history, or why that is not possible (`no merge base: ...`). The manifest
   also records the project name, the commit of modules added later with `--add`,
   and, for files `--update` left differing, the commit they were judged against.
+- **`--merge`** (with `--update`, and with `--dry-run` to preview) carries the
+  template's changes into those files. A `kept` file whose template text changed
+  since install is handled by what is true of it: unmodified since install, it takes
+  the new template text (`updated`); edited by you, the template's changes are merged
+  three-way against the template as installed when your edits do not overlap theirs
+  (`merged`); if they overlap, or the file has no merge base, it is left exactly as it
+  is (`conflict` or `kept`). No conflict markers are ever written, and nothing is
+  merged into files you created. `docs/plans/next.md` is replaced only while it is
+  unmodified. A project that does not record its name needs `--name` with `--merge`.
+  `--merge` cannot be limited to named modules. `--update` records the template commit
+  only after a full run, so a run limited to named modules leaves the base in place.
 - **External modules** are compared by the digest in `.template-manifest`. Without
   names, a registered store is looked up in the registry; one that is not registered
   or fails verification is skipped with a note. Name it by registered name or
