@@ -28,6 +28,9 @@ the template or the template carrying per-project knowledge.
   only, in a descriptor whose schema the template owns; several stores may be used
   in one project; the knowledge-base generator prints a registration hint and does
   not invoke the template.
+- Candidate 1 is complete (2026-10-18, plan
+  [0006](../plans/0006-external-module-core.md)): `name=path` works in `--with` and
+  `--add`.
 - The sibling `claude_knowledge_base` is a generator that creates stores. Its
   roadmap (`knowledge-base-starter`, candidate 7) expects this integration; it
   will also drop `--add-to` and ship the descriptor. That work belongs to that
