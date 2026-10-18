@@ -2402,6 +2402,54 @@ class UpdateTest(ProjectCase):
         self.assertIn("plan-discovery", err)
         self.assertEqual(self.read("docs/plans/0001-old.md"), self.OLD_PLAN)
 
+    # -- report of files left alone (plan 0014) -------------------------
+
+    def test_fresh_project_reports_nothing_left_alone(self):
+        self.new(ALL)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("kept", out)
+        self.assertNotIn("not patched", out)
+
+    def test_differing_base_file_is_kept_and_reported(self):
+        self.new("graphify")
+        mine = self.read("docs/plans/README.md") + "\nMy own rule.\n"
+        self.write("docs/plans/README.md", mine)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/plans/README.md"), mine)
+        self.assertIn("kept docs/plans/README.md (differs from the template", out)
+
+    def test_report_appears_in_a_dry_run(self):
+        self.new("graphify")
+        self.write("docs/plans/README.md", "mine\n")
+        before = tree_hash(self.target())
+        code, out, err = self.update("--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("kept docs/plans/README.md", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_blocks_alone_do_not_make_a_file_differ(self):
+        self.new(ALL)
+        code, out, err = self.update()
+        self.assertNotIn("kept AGENTS.md", out)
+        self.assertNotIn("kept docs/plans/next.md", out)
+
+    def test_project_created_file_with_a_marker_is_reported(self):
+        self.new("graphify")
+        self.write("docs/plans/0001-old.md", self.OLD_PLAN)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/plans/0001-old.md"), self.OLD_PLAN)
+        self.assertIn("skipped docs/plans/0001-old.md (project-created file with markers", out)
+
+    def test_active_plan_is_reported_as_per_plan(self):
+        self.new("graphify")
+        self.write("docs/plans/next.md", "# My plan\n\nStatus: Proposed\nCreated: 2026-01-01\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("kept docs/plans/next.md (per-plan file", out)
+
     def test_projects_grown_by_add_are_stable(self):
         self.new("claude")
         for name in ("graphify", "cad", "cad-freecad", "formal"):

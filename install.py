@@ -1352,6 +1352,19 @@ def load_update_externals(args, entries, recorded, project, builtin, notes):
     return loaded
 
 
+def differs_from_template(current, shipped):
+    """True when a project file differs from the template's file, ignoring module blocks."""
+    if current == shipped:
+        return False
+    if not (is_text(current) and is_text(shipped)):
+        return True
+    try:
+        stripped, _ = strip_blocks(current.decode("utf-8"))
+    except ValueError:
+        return True
+    return _content(stripped) != _content(shipped.decode("utf-8"))
+
+
 def cmd_update(args, out):
     modules = load_modules()
     project = os.path.abspath(args.dir)
@@ -1401,12 +1414,21 @@ def cmd_update(args, out):
         substitute(files, project_name)
         for rel, data in sorted(files.items()):
             if rel in existing:
-                if existing[rel] != data:
-                    kept.append(rel)
+                if differs_from_template(existing[rel], data):
+                    kept.append(("kept", rel, "differs from the module's file; not overwriting"))
             elif os.path.lexists(os.path.join(project, *rel.split("/"))):
-                kept.append(rel)
+                kept.append(("kept", rel, "differs from the module's file; not overwriting"))
             else:
                 writes[rel] = data
+    base_files = collect_tree(BASE_DIR)
+    substitute(base_files, project_name)
+    for rel, data in sorted(base_files.items()):
+        if rel in existing and differs_from_template(existing[rel], data):
+            if rel == PLAN_FILE:
+                kept.append(("kept", rel, "per-plan file; differs from the template, only an "
+                                       "unmodified copy is updated"))
+            else:
+                kept.append(("kept", rel, "differs from the template; not overwriting"))
 
     files = dict(existing, **writes)
     fresh = {name: modules[name]["slots"] for name in targets}
@@ -1417,9 +1439,10 @@ def cmd_update(args, out):
     seen = set()
     for rel in sorted(files):
         data = files[rel]
-        if rel.casefold() not in owned:
-            continue
         if not is_text(data) or not (b"@module-slot:" in data or b"BEGIN module:" in data):
+            continue
+        if rel.casefold() not in owned:
+            kept.append(("skipped", rel, "project-created file with markers; not patched"))
             continue
         text = data.decode("utf-8")
         try:
@@ -1442,8 +1465,8 @@ def cmd_update(args, out):
                          % (module, slot))
 
     out("Updating modules: %s" % (", ".join(targets + sorted(changed)) or "none"))
-    for rel in kept:
-        out("  kept %s (differs from the module's file; not overwriting)" % rel)
+    for verb, rel, why in kept:
+        out("  %s %s (%s)" % (verb, rel, why))
     for note in notes:
         out("  note: %s" % note)
     if not writes and not changed:

@@ -81,6 +81,11 @@ with this checkout. It never commits.
 - `base/` files are not updated, and no module or orphaned block is removed. A file
   whose block markers are malformed or were rearranged by hand is left alone and
   reported.
+- **Report.** Every file it leaves alone is listed with a reason: `kept` for a
+  `base/` or module file that differs from the template (module blocks are ignored
+  in the comparison), including a `docs/plans/next.md` in use, and `skipped` for a
+  file you created that carries slot or block markers. The list is printed with
+  `--dry-run` too, so you can see what differs before changing anything.
 - **External modules** are compared by the digest in `.template-manifest`. Without
   names, a registered store is looked up in the registry; one that is not registered
   or fails verification is skipped with a note. Name it by registered name or
