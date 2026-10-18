@@ -37,10 +37,13 @@ the template or the template carrying per-project knowledge.
   [0008](../plans/0008-external-module-review.md)): two adversarial passes, findings
   fixed, ADR 0002 addendum, and [ADR 0003](../decisions/0003-external-module-mechanism.md)
   (Accepted 2026-10-18).
+- The template side is complete, and the root `README.md` documents `name=path`,
+  `--register`, the registry, and writing an external module (2026-10-18).
 - The sibling `claude_knowledge_base` is a generator that creates stores. Its
   roadmap (`knowledge-base-starter`, candidate 7) expects this integration; it
-  will also drop `--add-to` and ship the descriptor. That work belongs to that
-  repository's own roadmap and plans.
+  will also drop `--add-to` and ship the descriptor. Its owner is implementing the
+  store-side contract and the end-to-end check in that repository, outside this
+  roadmap.
 
 ## Ordered plan candidates
 
@@ -75,25 +78,20 @@ the external-module mechanism.
 **Boundary:** the external-module and registry paths only.
 **Promotion trigger:** candidate 2 is complete.
 
-### 4. Store-side contract (in `claude_knowledge_base`)
+### 4. Store-side contract (in `claude_knowledge_base`) — not ours
 
-**Outcome:** that repository drops `--add-to`, ships `template-module/` in every
-generated store, and prints the registration hint, as the specification's contract
-section requires.
-**Dependencies:** candidate 1 fixes the descriptor format the store must meet.
-**Boundary:** work in `claude_knowledge_base` under its own roadmap and plans. Nothing
-in the template depends on it, and it does not depend on the template.
-**Promotion trigger:** the owner promotes the matching candidate in that repository.
+Owned and in progress in `claude_knowledge_base` (2026-10-18). That repository drops
+`--add-to`, ships `template-module/` in every generated store, and prints the
+registration hint, as the specification's contract section requires. Nothing in the
+template depends on it. This roadmap does not track or promote it.
 
-### 5. End-to-end check
+### 5. End-to-end check — split
 
-**Outcome:** a store created by the generator is registered and installed into a
-scratch project, and the result is verified by hand and recorded in the
-documentation of both repositories.
-**Dependencies:** candidates 2 and 4.
-**Boundary:** verification and documentation, including the README sections on
-registering and writing an external module; no new behavior.
-**Promotion trigger:** candidates 2 and 4 are complete.
+The README sections on registering and writing an external module are done on the
+template side. The end-to-end check (a generated store registered and installed into
+a scratch project) belongs to the knowledge-base owner with candidate 4. If the
+template should record its result, that is a documentation update after it, not a
+plan here.
 
 ## Deferred
 

@@ -49,6 +49,55 @@ would write through) or non-regular files, a malformed manifest, and any module
 file under `.git/`. Name placeholders in a module's files are
 filled from the project directory name (or `--name`).
 
+## Use a standalone project as a module
+
+A standalone project can ship a `template-module/` descriptor and be installed as
+an external module. It contributes slot fragments only, never files. Name it by
+path for one run, or register it once on this machine:
+
+```sh
+./install.py --register ~/projects/my_kb [--name my_kb] [--dry-run]
+./install.py --list                                   # built-in modules, then registered stores
+./install.py ../my-project --with claude,my_kb        # registered name
+./install.py ../my-project --with scratch=~/projects/my_kb   # name=path, no registration
+~/projects/claude_project_template/install.py --add my_kb     # in an existing project
+./install.py --unregister my_kb
+```
+
+- The registered name defaults to the store's directory name (`--name` overrides)
+  and must match `[a-z0-9][a-z0-9_-]*`. It never equals a built-in module name.
+  A name maps to one path and a path to one name.
+- The registry is `registry.json` under `$XDG_CONFIG_HOME/claude-project-template/`
+  (`~/.config/claude-project-template/` when unset). It is machine-local, read
+  only when a command needs it, and never repaired by the installer.
+- The store is verified read-only on every use (no symlinked store, no `.git`
+  component, no program or `git` command run in it). The path is not recorded in
+  the project; `.template-manifest` keeps the module's format and a SHA-256 digest
+  of its descriptor under `external_modules`.
+- External modules install after the built-in ones. `--add` of a name already in
+  the manifest reports it as installed and reads nothing.
+- `--unregister` removes only the registry entry. Projects keep their blocks.
+
+The descriptor format, rules, and trust model are in
+`docs/specs/external-modules.md`, `docs/decisions/0002-installer-trust-model.md`,
+and `docs/decisions/0003-external-module-mechanism.md`.
+
+### Writing an external module
+
+A store contains `template-module/module.json` and `template-module/slots/<slot>.md`:
+
+```json
+{ "module_format": 1, "description": "One line, 1-200 characters", "hint": "optional next step" }
+```
+
+- `module_format` must be 1. There is no `name`, `order`, `requires` or `harness`
+  key; unknown keys are errors.
+- Each fragment is named for a slot in the table below, is UTF-8 text of at most
+  64 KiB, and at most 16 are allowed. It must not contain `@module-slot:`,
+  `BEGIN module:` or `END module:`, and its text must be tool-neutral.
+- `REPLACE_WITH_MODULE_NAME` and `REPLACE_WITH_MODULE_PATH` are filled in. The path
+  is specific to one checkout, so a fragment that uses it should say so.
+
 ## Security notes
 
 The installer treats everything in a project under `--add`, every command-line
