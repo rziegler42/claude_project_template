@@ -16,3 +16,4 @@ and formats in `base/docs/plans/README.md`; `next.md` is the sole active plan.
 | [0007](0007-registry.md) | Completed | Machine-local registry: `--register`, `--unregister`, `--list` for standalone projects, and registered names in `--with` and `--add` |
 | [0008](0008-external-module-review.md) | Completed | Adversarial review of the external-module and registry paths; seven findings fixed with regression tests, ADR 0002 addendum, ADR 0003 (Accepted) |
 | [0009](0009-installer-update.md) | Completed | `--update`/`--upgrade` refreshes installed built-in and external modules in a project: blocks re-rendered, missing files written, differing files kept; security review skipped by the owner |
+| [0010](0010-installer-module-removal.md) | Completed | `--remove` takes installed built-in and external modules out of a project: blocks stripped, unedited module files deleted descriptor-relative, manifest updated; adversarial review fixed four defects |
