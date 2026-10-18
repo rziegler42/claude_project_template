@@ -1232,8 +1232,11 @@ def safe_relpath(rel):
     if not isinstance(rel, str) or not rel or len(rel) > 512 or not rel.isprintable():
         return False
     parts = rel.split("/")
-    return not (rel.startswith("/") or "" in parts or "." in parts or ".." in parts
-                or any(part.casefold() == ".git" for part in parts))
+    # Windows ignores trailing dots and spaces and reads `\` and `:` as separators or
+    # drive letters, so a path a consumer joins later cannot slip through.
+    return not (rel.startswith("/") or "\\" in rel or ":" in rel
+                or "" in parts or "." in parts or ".." in parts
+                or any(part.rstrip(" .").casefold() == ".git" for part in parts))
 
 
 def validate_optional_keys(manifest, builtin):

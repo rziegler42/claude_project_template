@@ -267,8 +267,9 @@ declaring module has no `module_info` key. External modules cannot declare these
 
 For readers of the manifest: a missing entry means "not declared", and projects
 installed before this key existed have none until their next full `--update`.
-Treat the values as untrusted data, as with the rest of the manifest, and resolve each
-path against the project root. The values come from the template, so they are the same
+Treat the values as untrusted data, as with the rest of the manifest: resolve each
+path against the project root, check with `realpath` that it stays inside, and do not
+follow a symlink out of the project. A path may name any file in the project. The values come from the template, so they are the same
 in every project; a location chosen at install time is not recorded.
 
 ## Writing a module

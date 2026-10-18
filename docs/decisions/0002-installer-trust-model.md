@@ -279,6 +279,9 @@ manifest: on load it is limited to the entry count, to modules the manifest list
 the same bounds the installer applies to a module's own `module.json` (a lowercase type
 name, at most 16 safe relative paths, and plain JSON data of bounded depth, size and
 string length). A hostile value is refused before anything is written. The installer never
-acts on these values; consumers must treat them as data and resolve paths against the
-project root. External modules cannot declare them, since their descriptor format rejects
+acts on these values; consumers must treat them as data, resolve paths against the
+project root, confirm with `realpath` that they stay inside, and not follow symlinks (a
+role may name any file in the project, including one the manifest's editor chose). The
+path check rejects `\`, `:`, and a `.git` component with trailing dots or spaces, so a
+consumer on Windows cannot be steered into git metadata or another drive. External modules cannot declare them, since their descriptor format rejects
 unknown keys.
