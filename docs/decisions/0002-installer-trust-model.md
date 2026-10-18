@@ -270,3 +270,15 @@ ships, and does not write a merged text that the block check rejects.
 Accepted residual: a project file edited between the scan and the write is overwritten on
 that basis, as for every other patched file; the merge widens that window by the time
 `git merge-file` takes.
+
+## Addendum: module info in the manifest
+
+The manifest's optional `module_info` key copies a built-in module's `type`, `paths` and
+`data` for tools that read the manifest. It is untrusted input like the rest of the
+manifest: on load it is limited to the entry count, to modules the manifest lists, and to
+the same bounds the installer applies to a module's own `module.json` (a lowercase type
+name, at most 16 safe relative paths, and plain JSON data of bounded depth, size and
+string length). A hostile value is refused before anything is written. The installer never
+acts on these values; consumers must treat them as data and resolve paths against the
+project root. External modules cannot declare them, since their descriptor format rejects
+unknown keys.

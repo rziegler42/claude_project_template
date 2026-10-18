@@ -221,7 +221,8 @@ the trust model, mitigations, and accepted residuals. In practice:
 - `modules/<name>/` — opt-in content:
   - `module.json` — `description`, `requires`, `order`, optional `harness`,
     and optional `hint` (one printable line, at most 200 characters) that the
-    installer prints under "Next steps" after a new install or `--add`.
+    installer prints under "Next steps" after a new install or `--add`, and
+    optional `type`, `paths` and `data` (see [Module info](#module-info)).
   - `files/` — copied verbatim to the same relative path.
   - `slots/<slot>.md` — fragments inserted at `@module-slot: <slot>` marker
     lines in `base/` files or other modules' files, wrapped in
@@ -243,6 +244,32 @@ the trust model, mitigations, and accepted residuals. In practice:
 | `formal` | Tool-neutral formal verification guidance |
 | `cad` | Tool-neutral CAD workflow (`docs/cad.md`) |
 | `cad-freecad` | FreeCAD conventions; requires `cad` |
+
+## Module info
+
+A built-in module may declare, in `module.json`, what it is and where its files live,
+so a skill or another module can find it from one file:
+
+- `type`: a lowercase name for the kind of module (`knowledge-base`), at most 64
+  characters. Two modules may share a type.
+- `paths`: up to 16 roles, each mapped to a safe project-relative path
+  (`{"store": "docs/kb"}`).
+- `data`: a small JSON object of other module-specific values: plain JSON, at most
+  4 levels deep, 256 values and 4096 bytes, with short printable strings.
+
+All three are optional. The installer copies what a module declares into
+`.template-manifest` as `module_info` (`{module: {type, paths, data}}`), one entry per
+installed module that declares anything. `--new` and `--add` record entries, `--remove`
+drops them, and a full `--update` rebuilds them from the current template (an entry for
+a module the template no longer provides is kept). A run limited to named modules
+leaves them alone. A module that declares nothing has no entry, and a project with no
+declaring module has no `module_info` key. External modules cannot declare these keys.
+
+For readers of the manifest: a missing entry means "not declared", and projects
+installed before this key existed have none until their next full `--update`.
+Treat the values as untrusted data, as with the rest of the manifest, and resolve each
+path against the project root. The values come from the template, so they are the same
+in every project; a location chosen at install time is not recorded.
 
 ## Writing a module
 
