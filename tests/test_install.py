@@ -1623,7 +1623,9 @@ class ExternalModuleTest(unittest.TestCase):
         self.assertEqual(manifest["modules"], ["graphify"])
         self.assertEqual(manifest["external_modules"],
                          {"kb": {"module_format": 1, "digest": FIXTURE_DIGEST}})
-        self.assertNotIn(os.path.basename(store), json.dumps(manifest))
+        # The store location lives only in module_info, never in the digest record.
+        self.assertNotIn(os.path.basename(store), json.dumps(manifest["external_modules"]))
+        self.assertEqual(manifest["module_info"], {"kb": {"store": "../my_kb"}})
 
     def test_builtin_only_manifest_has_no_external_key(self):
         self.assertEqual(self.new("graphify")[0], 0)
@@ -3596,6 +3598,173 @@ class ModuleInfoTest(ProjectCase):
                                        for i in range(install.MANIFEST_MAP_MAX + 1)})
         code, out, err = self.update()
         self.assertEqual(code, 2)
+
+
+FORMAT_TWO_MODULE = json.dumps({
+    "module_format": 2, "description": "Fixture store", "type": "knowledge-base",
+    "paths": {"index": "docs/kb/index.md"}, "data": {"kinds": ["note"]},
+}).encode()
+
+
+class ExternalModuleInfoTest(ProjectCase):
+    def store(self, **kwargs):
+        return make_store(self.work, **kwargs)
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def set_manifest(self, manifest):
+        self.write(".template-manifest", json.dumps(manifest))
+
+    def add(self, entry):
+        return run(["--add", entry, "--dir", self.target()])
+
+    def test_store_ok_accepts_only_the_two_forms(self):
+        for good in ("../my_kb", "../kb.v2", "/srv/kb", "/Users/me/projects/my_kb"):
+            with self.subTest(good=good):
+                self.assertTrue(install.store_ok(good))
+        for bad in ("", ".", "..", "./name", "foo/bar", "../a/b", "../..", "../", "../.",
+                    "/", "//x", "/a//b", "/a/", "/a/../b", "/a/./b", "../.git", "/x/.git",
+                    "/x/.git /y", "../a\\b", "../a:b", "/a\\b", "C:/x", "../\x07",
+                    "../" + "a" * 600, 5, None, ["../x"]):
+            with self.subTest(bad=bad if not isinstance(bad, str) else bad[:20]):
+                self.assertFalse(install.store_ok(bad))
+
+    def test_format_one_external_records_only_its_store(self):
+        self.assertEqual(self.new("my_kb=" + self.store())[0], 0)
+        self.assertEqual(self.manifest()["module_info"], {"my_kb": {"store": "../my_kb"}})
+
+    def test_format_two_external_records_declared_info_and_store(self):
+        self.assertEqual(self.new("my_kb=" + self.store(module=FORMAT_TWO_MODULE))[0], 0)
+        self.assertEqual(self.manifest()["module_info"], {"my_kb": {
+            "store": "../my_kb", "type": "knowledge-base",
+            "paths": {"index": "docs/kb/index.md"}, "data": {"kinds": ["note"]}}})
+
+    def test_store_elsewhere_is_recorded_absolute(self):
+        elsewhere = os.path.join(self.work, "elsewhere")
+        os.makedirs(elsewhere)
+        store = make_store(elsewhere)
+        self.assertEqual(self.new("my_kb=" + store)[0], 0)
+        self.assertEqual(self.manifest()["module_info"]["my_kb"]["store"], os.path.realpath(store))
+
+    def test_builtin_only_project_has_no_module_info(self):
+        self.assertEqual(self.new("graphify")[0], 0)
+        self.assertNotIn("module_info", self.manifest())
+
+    def test_add_records_the_external_and_keeps_other_entries(self):
+        self.assertEqual(self.new("graphify")[0], 0)
+        code, out, err = self.add("my_kb=" + self.store(module=FORMAT_TWO_MODULE))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(list(self.manifest()["module_info"]), ["my_kb"])
+        other = make_store(self.work, name="second")
+        self.assertEqual(self.add("second=" + other)[0], 0)
+        info = self.manifest()["module_info"]
+        self.assertEqual(sorted(info), ["my_kb", "second"])
+        self.assertEqual(info["second"], {"store": "../second"})
+
+    def test_remove_drops_the_entry_and_then_the_key(self):
+        self.new("my_kb=" + self.store())
+        self.assertEqual(run(["--add", "second=" + make_store(self.work, name="second"),
+                              "--dir", self.target()])[0], 0)
+        self.assertEqual(run(["--remove", "my_kb", "--dir", self.target()])[0], 0)
+        self.assertEqual(list(self.manifest()["module_info"]), ["second"])
+        self.assertEqual(run(["--remove", "second", "--dir", self.target()])[0], 0)
+        self.assertNotIn("module_info", self.manifest())
+
+    def test_named_update_adds_a_missing_store_for_an_unchanged_descriptor(self):
+        store = self.store()
+        self.new("my_kb=" + store)
+        manifest = self.manifest()
+        del manifest["module_info"]
+        self.set_manifest(manifest)
+        code, out, err = self.update("my_kb=" + store, "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would write .template-manifest", out)
+        self.assertNotIn("module_info", self.manifest())
+        self.assertEqual(self.update("my_kb=" + store)[0], 0)
+        self.assertEqual(self.manifest()["module_info"], {"my_kb": {"store": "../my_kb"}})
+
+    def test_full_update_corrects_a_stale_store(self):
+        store = self.store()
+        self.assertEqual(run(["--register", store])[0], 0)
+        self.new("my_kb")
+        manifest = self.manifest()
+        manifest["module_info"]["my_kb"]["store"] = "../old"
+        self.set_manifest(manifest)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Nothing to update", out)
+        self.assertEqual(self.manifest()["module_info"]["my_kb"]["store"], "../my_kb")
+
+    def test_update_refreshes_declared_info(self):
+        store = self.store(module=FORMAT_TWO_MODULE)
+        self.new("my_kb=" + store)
+        changed = json.loads(FORMAT_TWO_MODULE)
+        changed["data"] = {"kinds": ["note", "page"]}
+        with open(os.path.join(store, "template-module", "module.json"), "w") as handle:
+            json.dump(changed, handle)
+        self.assertEqual(self.update("my_kb=" + store)[0], 0)
+        self.assertEqual(self.manifest()["module_info"]["my_kb"]["data"],
+                         {"kinds": ["note", "page"]})
+
+    def test_unverifiable_external_keeps_its_entry_on_full_update(self):
+        self.new("graphify,my_kb=" + self.store(module=FORMAT_TWO_MODULE))
+        before = self.manifest()["module_info"]
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("skipped", out)
+        self.assertEqual(self.manifest()["module_info"], before)
+
+    def test_unchanged_external_is_a_noop(self):
+        store = self.store(module=FORMAT_TWO_MODULE)
+        self.new("my_kb=" + store)
+        before = tree_hash(self.target())
+        code, out, err = self.update("my_kb=" + store)
+        self.assertIn("Nothing to update", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_hostile_external_entries_are_refused_on_load(self):
+        self.new("graphify,my_kb=" + self.store())
+        deep = {}
+        node = deep
+        for _ in range(8):
+            node["d"] = {}
+            node = node["d"]
+        bad_values = [
+            {"my_kb": {}}, {"my_kb": {"type": "x"}}, {"my_kb": {"store": 5}},
+            {"my_kb": {"store": "foo/bar"}}, {"my_kb": {"store": "../a/b"}},
+            {"my_kb": {"store": "."}}, {"my_kb": {"store": ""}},
+            {"my_kb": {"store": "../.git"}}, {"my_kb": {"store": "../a\\b"}},
+            {"my_kb": {"store": "../" + "a" * 600}},
+            {"my_kb": {"store": "../my_kb", "extra": 1}},
+            {"my_kb": {"store": "../my_kb", "type": "BAD"}},
+            {"my_kb": {"store": "../my_kb", "paths": {"s": "/abs"}}},
+            {"my_kb": {"store": "../my_kb", "data": deep}},
+            {"graphify": {"store": "../my_kb", "type": "x"}},
+            {"unknown": {"store": "../x"}}, {"Bad_Name": {"store": "../x"}},
+        ]
+        for bad in bad_values:
+            with self.subTest(bad=repr(bad)[:70]):
+                manifest = self.manifest()
+                manifest["module_info"] = bad
+                self.set_manifest(manifest)
+                code, out, err = self.update()
+                self.assertEqual(code, 2)
+                self.assertIn("module_info", err)
+
+    def test_valid_absolute_store_entry_loads(self):
+        self.new("graphify,my_kb=" + self.store())
+        manifest = self.manifest()
+        manifest["module_info"]["my_kb"]["store"] = "/srv/kb"
+        self.set_manifest(manifest)
+        self.assertEqual(self.update("graphify")[0], 0)
+
+    def test_store_path_that_cannot_be_recorded_is_refused(self):
+        odd = make_store(self.work, name="odd:name")
+        code, out, err = self.new("odd=" + odd)
+        self.assertEqual(code, 2)
+        self.assertIn("odd", err)
+        self.assertFalse(os.path.exists(self.target()))
 
 
 class ModuleHygieneTest(unittest.TestCase):

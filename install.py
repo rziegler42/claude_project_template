@@ -192,6 +192,21 @@ def plain_json(data):
     return len(json.dumps(data)) <= INFO_DATA_BYTES
 
 
+def store_ok(value):
+    """True for the two forms recorded as an external module's `store`.
+
+    Sibling: `../` plus one safe component. Absolute: `/` plus safe components.
+    Anything else, such as `foo/bar` or `.`, is refused so a consumer never
+    resolves a surprise path against the project root.
+    """
+    if not (isinstance(value, str) and len(value) <= 512):
+        return False
+    if value.startswith("../"):
+        part = value[3:]
+        return "/" not in part and safe_relpath(part)
+    return value.startswith("/") and safe_relpath(value[1:])
+
+
 def parse_entries(parts):
     """Split `--with`/`--add` parts into (name, value or None) on the first `=`."""
     entries = []
@@ -345,6 +360,8 @@ def read_external(name, value, target, builtin):
         parent = os.path.realpath(os.path.dirname(os.path.abspath(target)))
         if os.path.dirname(store) == parent:
             where = "../" + os.path.basename(store)
+    if not store_ok(where):
+        raise InstallError("module %s: store path cannot be recorded in %s" % (name, MANIFEST))
     slots = {}
     for slot in sorted(raw_slots):
         if not is_text(raw_slots[slot]):
@@ -364,6 +381,7 @@ def read_external(name, value, target, builtin):
         "order": EXTERNAL_ORDER, "harness": False, "slots": slots,
     }
     module.update({k: meta[k] for k in INFO_KEYS if k in meta})
+    module["store"] = where
     return module
 
 
@@ -1247,6 +1265,22 @@ def safe_relpath(rel):
                 or any(part.rstrip(" .").casefold() == ".git" for part in parts))
 
 
+def info_entry_ok(name, entry, manifest):
+    """One `module_info` entry: a built-in module's, or an external one that has a `store`."""
+    if not (isinstance(name, str) and isinstance(entry, dict) and entry):
+        return False
+    if NAME_RE.match(name) and name in manifest["modules"]:
+        allowed = set(INFO_KEYS)
+    elif EXT_NAME_RE.match(name) and name in manifest.get("external_modules", {}):
+        allowed = set(INFO_KEYS) | {"store"}
+        if not store_ok(entry.get("store")):
+            return False
+    else:
+        return False
+    declared = {k: v for k, v in entry.items() if k in INFO_KEYS}
+    return set(entry) <= allowed and module_info_problem(declared) is None
+
+
 def validate_optional_keys(manifest, builtin):
     """Check the keys older manifests lack: project_name, module_commits, file_bases, module_info."""
     name = manifest.get("project_name")
@@ -1266,10 +1300,7 @@ def validate_optional_keys(manifest, builtin):
     if "module_info" in manifest:
         info = manifest["module_info"]
         ok = ok and isinstance(info, dict) and len(info) <= MANIFEST_MAP_MAX and all(
-            isinstance(k, str) and NAME_RE.match(k) and k in manifest["modules"]
-            and isinstance(v, dict) and v and set(v) <= set(INFO_KEYS)
-            and module_info_problem(v) is None
-            for k, v in info.items())
+            info_entry_ok(k, v, manifest) for k, v in info.items())
     if not ok:
         raise InstallError("%s has a malformed project_name, module_commits, file_bases or "
                            "module_info entry" % MANIFEST)
@@ -1311,10 +1342,17 @@ def external_record(meta):
 
 
 def module_info_for(modules, names):
-    """The type, paths and data each named built-in module declares, if any."""
+    """The type, paths and data each named module declares, if any.
+
+    An external module always has an entry, because it carries the `store`
+    location the user gave.
+    """
     info = {}
     for name in sorted(names):
-        declared = {k: modules[name][k] for k in INFO_KEYS if k in modules[name]}
+        meta = modules[name]
+        declared = {k: meta[k] for k in INFO_KEYS if k in meta}
+        if meta.get("external"):
+            declared["store"] = meta["store"]
         if declared:
             info[name] = declared
     return info
@@ -1372,7 +1410,7 @@ def cmd_new(args, out):
         [n for n in names if n in builtin], commit, dirty,
         {n: external_record(modules[n]) for n in names if n in externals},
         project_name=name,
-        module_info=module_info_for(modules, [n for n in names if n in builtin]),
+        module_info=module_info_for(modules, names),
     )
 
     out("Project: %s" % name)
@@ -1587,7 +1625,7 @@ def cmd_add(args, out):
         manifest["module_commits"] = added
     manifest["modules"] = sorted(n for n in wanted if n not in externals)
     info = dict(manifest.get("module_info", {}))
-    info.update(module_info_for(modules, [n for n in new if n not in externals]))
+    info.update(module_info_for(modules, new))
     if info:
         manifest["module_info"] = info
     for name in externals:
@@ -1932,12 +1970,16 @@ def cmd_update(args, out):
         out("  %s %s (%s)" % (verb, rel, why))
     for note in notes:
         out("  note: %s" % note)
-    info = manifest.get("module_info", {})
+    info = dict(manifest.get("module_info", {}))
     if not entries:
         # Declared by the template, so a full run rebuilds it; a module the
-        # template no longer provides keeps what the manifest recorded.
-        info = {n: v for n, v in info.items() if n not in modules and n in installed}
+        # template no longer provides, or an external it could not verify,
+        # keeps what the manifest recorded.
+        info = {n: v for n, v in info.items()
+                if (n not in modules and n in installed) or (n in recorded and n not in externals)}
         info.update(module_info_for(modules, present))
+    # Every external that verified gets a fresh entry, whether or not its digest moved.
+    info.update(module_info_for(externals, sorted(externals)))
     info_changed = info != manifest.get("module_info", {})
     if not writes and not changed and not info_changed:
         out("Nothing to update.")
