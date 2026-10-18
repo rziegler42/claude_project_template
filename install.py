@@ -37,7 +37,7 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 EXT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}\Z")
 DESCRIPTOR_DIR = "template-module"
-MODULE_FORMATS = (1,)
+MODULE_FORMATS = (1, 2)
 EXTERNAL_ORDER = 1000000
 DESCRIPTION_MAX = 200
 FRAGMENT_MAX_BYTES = 64 * 1024
@@ -307,15 +307,21 @@ def read_external(name, value, target, builtin):
         raise InstallError("module %s: module.json is not a valid JSON object" % name)
     if not isinstance(meta, dict):
         raise InstallError("module %s: module.json is not a valid JSON object" % name)
-    unknown = set(meta) - {"module_format", "description", "hint"}
-    if unknown:
-        raise InstallError("module %s: unknown module.json keys: %s" % (name, len(unknown)))
     fmt = meta.get("module_format")
     if isinstance(fmt, bool) or not isinstance(fmt, int) or fmt not in MODULE_FORMATS:
         raise InstallError(
             "module %s: module_format %s is not supported (this installer supports %s)"
             % (name, shown_format(fmt), ", ".join(str(f) for f in MODULE_FORMATS))
         )
+    allowed = {"module_format", "description", "hint"}
+    if fmt >= 2:
+        allowed |= set(INFO_KEYS)
+    unknown = set(meta) - allowed
+    if unknown:
+        raise InstallError("module %s: unknown module.json keys: %s" % (name, len(unknown)))
+    problem = module_info_problem({k: meta[k] for k in INFO_KEYS if k in meta})
+    if problem:
+        raise InstallError("module %s: %s" % (name, problem))
     for key, required in (("description", True), ("hint", False)):
         if key not in meta and not required:
             continue
@@ -352,11 +358,13 @@ def read_external(name, value, target, builtin):
     digest = descriptor_digest(
         [("module.json", raw)] + [("slots/%s.md" % s, raw_slots[s]) for s in sorted(raw_slots)]
     )
-    return {
+    module = {
         "name": name, "path": store, "external": True, "description": meta["description"],
         "hint": meta.get("hint"), "module_format": fmt, "digest": digest, "requires": [],
         "order": EXTERNAL_ORDER, "harness": False, "slots": slots,
     }
+    module.update({k: meta[k] for k in INFO_KEYS if k in meta})
+    return module
 
 
 def load_externals(entries, target, builtin, registered=()):

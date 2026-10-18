@@ -1349,7 +1349,7 @@ class ExternalModuleTest(unittest.TestCase):
             "unknown key": module(b'{"module_format": 1, "description": "d", "order": 3}'),
             "mistyped description": module(b'{"module_format": 1, "description": 5}'),
             "bool format": module(b'{"module_format": true, "description": "d"}'),
-            "unknown format": module(b'{"module_format": 2, "description": "d"}'),
+            "unknown format": module(b'{"module_format": 3, "description": "d"}'),
             "empty description": module(b'{"module_format": 1, "description": ""}'),
             "long description": module(json.dumps(
                 {"module_format": 1, "description": "d" * 201}).encode()),
@@ -1379,7 +1379,60 @@ class ExternalModuleTest(unittest.TestCase):
         store = self.store(module=b'{"module_format": 7, "description": "d"}')
         message = self.assertRefused(store)
         self.assertIn("7", message)
-        self.assertIn("supports 1", message)
+        self.assertIn("supports 1, 2", message)
+
+    def test_format_two_declares_type_paths_and_data(self):
+        store = self.store(module=json.dumps({
+            "module_format": 2, "description": "d", "type": "knowledge-base",
+            "paths": {"index": "docs/kb/index.md"}, "data": {"kinds": ["note"]},
+        }).encode())
+        meta = self.load(store)
+        self.assertEqual(meta["module_format"], 2)
+        self.assertEqual(meta["type"], "knowledge-base")
+        self.assertEqual(meta["paths"], {"index": "docs/kb/index.md"})
+        self.assertEqual(meta["data"], {"kinds": ["note"]})
+
+    def test_format_two_without_info_keys_loads(self):
+        meta = self.load(self.store(module=b'{"module_format": 2, "description": "d"}'))
+        self.assertEqual(meta["module_format"], 2)
+        for key in install.INFO_KEYS:
+            self.assertNotIn(key, meta)
+
+    def test_format_one_still_refuses_info_keys(self):
+        for key, value in (("type", "x"), ("paths", {}), ("data", {})):
+            with self.subTest(key=key):
+                shutil.rmtree(os.path.join(self.work, "my_kb"), ignore_errors=True)
+                store = self.store(module=json.dumps(
+                    {"module_format": 1, "description": "d", key: value}).encode())
+                self.assertRefused(store)
+
+    def test_format_two_refuses_invalid_info(self):
+        cases = {
+            "uppercase type": {"type": "KB"},
+            "long type": {"type": "a" * 65},
+            "non-object paths": {"paths": ["docs"]},
+            "absolute path": {"paths": {"store": "/etc"}},
+            "traversal path": {"paths": {"store": "../x"}},
+            "backslash path": {"paths": {"store": "a\\b"}},
+            "non-object data": {"data": [1]},
+            "deep data": {"data": {"a": {"b": {"c": {"d": {"e": 1}}}}}},
+            "long data string": {"data": {"a": "x" * 201}},
+            "unknown key": {"order": 3},
+        }
+        for label, extra in cases.items():
+            with self.subTest(case=label):
+                shutil.rmtree(os.path.join(self.work, "my_kb"), ignore_errors=True)
+                meta = {"module_format": 2, "description": "d"}
+                meta.update(extra)
+                message = self.assertRefused(self.store(module=json.dumps(meta).encode()))
+                self.assertIn("kb", message)
+
+    def test_format_three_reports_the_format_even_with_info_keys(self):
+        store = self.store(module=json.dumps(
+            {"module_format": 3, "description": "d", "type": "kb"}).encode())
+        message = self.assertRefused(store)
+        self.assertIn("module_format 3", message)
+        self.assertNotIn("unknown module.json keys", message)
 
     def test_refusal_does_not_echo_content(self):
         store = self.store(module=b'{"module_format": 1, "description": "d", "SECRETVALUE": 1}')
@@ -1707,7 +1760,7 @@ class ExternalModuleTest(unittest.TestCase):
             "not an object": [],
             "bad name": {"Bad": good},
             "builtin name": {"cad": good},
-            "unknown format": {"kb": {"module_format": 2, "digest": FIXTURE_DIGEST}},
+            "unknown format": {"kb": {"module_format": 3, "digest": FIXTURE_DIGEST}},
             "bool format": {"kb": {"module_format": True, "digest": FIXTURE_DIGEST}},
             "short digest": {"kb": {"module_format": 1, "digest": "ab"}},
             "digest with newline": {"kb": {"module_format": 1, "digest": FIXTURE_DIGEST + "\n"}},
