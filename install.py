@@ -18,6 +18,7 @@ Standard library only (Python 3.9+). See docs/decisions/0001-*.md.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -60,6 +61,12 @@ BASE_MAX_FILES = 4096
 BASE_MAX_BYTES = 64 * 1024 * 1024
 MANIFEST_MAP_MAX = 10000
 GIT_TIMEOUT = 60
+INFO_KEYS = ("type", "paths", "data")
+INFO_NAME_MAX = 64
+INFO_PATHS_MAX = 16
+INFO_DATA_DEPTH = 4
+INFO_DATA_NODES = 256
+INFO_DATA_BYTES = 4096
 
 
 class InstallError(Exception):
@@ -109,6 +116,9 @@ def load_modules(modules_dir=None):
                 "module %s: hint must be a single printable line of 1-%d characters"
                 % (name, HINT_MAX)
             )
+        problem = module_info_problem({k: meta[k] for k in INFO_KEYS if k in meta})
+        if problem:
+            raise InstallError("module %s: %s" % (name, problem))
         slots = {}
         slot_dir = os.path.join(path, "slots")
         refuse_symlink(os.path.join(path, "files"), "module %s" % name)
@@ -124,6 +134,62 @@ def load_modules(modules_dir=None):
         meta.update(name=name, path=path, slots=slots)
         modules[name] = meta
     return modules
+
+
+def info_name_ok(text):
+    return isinstance(text, str) and len(text) <= INFO_NAME_MAX and bool(EXT_NAME_RE.match(text))
+
+
+def info_text_ok(text, limit):
+    return isinstance(text, str) and 0 < len(text) <= limit and text.isprintable()
+
+
+def module_info_problem(info):
+    """Describe what is wrong with a module's type, paths and data, or return None.
+
+    The values are copied into the project manifest and read by other tools,
+    so they are bounded and limited to plain JSON.
+    """
+    if "type" in info and not info_name_ok(info["type"]):
+        return "type must be a lowercase name of 1-%d characters" % INFO_NAME_MAX
+    if "paths" in info:
+        paths = info["paths"]
+        if not (isinstance(paths, dict) and len(paths) <= INFO_PATHS_MAX
+                and all(info_name_ok(role) and safe_relpath(rel) for role, rel in paths.items())):
+            return ("paths must map up to %d lowercase role names to safe relative paths"
+                    % INFO_PATHS_MAX)
+    if "data" in info:
+        data = info["data"]
+        if not isinstance(data, dict) or not plain_json(data):
+            return ("data must be an object of plain JSON no deeper than %d levels, with at "
+                    "most %d values and %d bytes" % (INFO_DATA_DEPTH, INFO_DATA_NODES,
+                                                      INFO_DATA_BYTES))
+    return None
+
+
+def plain_json(data):
+    """True for a bounded tree of dicts, lists, short printable strings, numbers, bools, null."""
+    nodes, stack = 0, [(data, 1)]
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > INFO_DATA_NODES or depth > INFO_DATA_DEPTH:
+            return False
+        if isinstance(value, dict):
+            if any(not info_text_ok(key, INFO_NAME_MAX) for key in value):
+                return False
+            stack.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            stack.extend((item, depth + 1) for item in value)
+        elif isinstance(value, str):
+            if not info_text_ok(value, DESCRIPTION_MAX):
+                return False
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                return False
+        elif not (value is None or isinstance(value, (bool, int))):
+            return False
+    return len(json.dumps(data)) <= INFO_DATA_BYTES
 
 
 def parse_entries(parts):

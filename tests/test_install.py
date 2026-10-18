@@ -455,6 +455,56 @@ class InstallerTest(unittest.TestCase):
                 with self.assertRaises(install.InstallError):
                     install.load_modules(root)
 
+    # -- module type, paths and data ----------------------------------------
+
+    def test_module_info_keys_load(self):
+        root = self.fake_modules({
+            "kb": {"description": "x", "type": "knowledge-base",
+                   "paths": {"store": "docs/kb", "index": "docs/kb/index.md"},
+                   "data": {"format": 2, "tags": ["a", "b"], "nested": {"on": True, "n": None}}},
+            "plain": {"description": "y"},
+        })
+        modules = install.load_modules(root)
+        self.assertEqual(modules["kb"]["type"], "knowledge-base")
+        self.assertEqual(modules["kb"]["paths"]["store"], "docs/kb")
+        self.assertEqual(modules["kb"]["data"]["format"], 2)
+        for key in ("type", "paths", "data"):
+            self.assertNotIn(key, modules["plain"])
+
+    def test_builtin_modules_declare_no_info(self):
+        for name, meta in install.load_modules().items():
+            for key in ("type", "paths", "data"):
+                self.assertNotIn(key, meta, name)
+
+    def test_invalid_module_info_fails_module_loading(self):
+        deep = {}
+        node = deep
+        for _ in range(8):
+            node["d"] = {}
+            node = node["d"]
+        bad_values = [
+            {"type": 5}, {"type": ""}, {"type": "Bad Type"}, {"type": "x" * 65},
+            {"type": None},
+            {"paths": []}, {"paths": "docs"}, {"paths": {"store": 5}},
+            {"paths": {"store": ""}}, {"paths": {"store": "/abs"}},
+            {"paths": {"store": "../up"}}, {"paths": {"store": "a/../b"}},
+            {"paths": {"store": "a//b"}}, {"paths": {"store": ".git/hooks"}},
+            {"paths": {"store": "bell\x07"}}, {"paths": {"Bad Role": "docs"}},
+            {"paths": {"r%d" % i: "docs/%d" % i for i in range(17)}},
+            {"data": []}, {"data": "x"}, {"data": {"k": float("nan")}},
+            {"data": {"k": float("inf")}}, {"data": deep},
+            {"data": {"k": "x" * 201}}, {"data": {"k": "bell\x07"}},
+            {"data": {"": 1}}, {"data": {"k" * 65: 1}},
+            {"data": {"k%d" % i: "v" * 150 for i in range(40)}},
+            {"data": {"k": list(range(300))}},
+        ]
+        for bad in bad_values:
+            with self.subTest(bad=repr(bad)[:60]):
+                root = self.fake_modules({"m": dict({"description": "x"}, **bad)})
+                with self.assertRaises(install.InstallError) as ctx:
+                    install.load_modules(root)
+                self.assertIn("module m", str(ctx.exception))
+
     # -- --add --------------------------------------------------------
 
     def test_add_matches_fresh_install(self):
