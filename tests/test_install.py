@@ -2335,6 +2335,63 @@ class UpdateTest(ProjectCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.read("AGENTS.md"), original)
 
+    OLD_PLAN = "# Old plan\n\n<!-- @module-slot: plan-discovery -->\n"
+
+    def test_update_leaves_project_created_files_alone(self):
+        self.new("graphify")
+        self.write("docs/plans/0001-old.md", self.OLD_PLAN)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/plans/0001-old.md"), self.OLD_PLAN)
+
+    def test_update_does_not_refresh_a_block_in_a_project_created_file(self):
+        self.new("graphify")
+        lines, begin, end = self.block_lines("docs/plans/next.md", "graphify", "plan-discovery")
+        lines[begin + 1] = "FILLED IN"
+        old = "\n".join(lines)
+        self.write("docs/plans/0001-old.md", old)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/plans/0001-old.md"), old)
+
+    def test_update_keeps_a_filled_in_block_in_next_md(self):
+        self.new("graphify")
+        lines, begin, end = self.block_lines("docs/plans/next.md", "graphify", "plan-discovery")
+        lines[end - 1] = "Graphify: skipped - scope is enumerated."
+        self.write("docs/plans/next.md", "\n".join(lines))
+        before = self.read("docs/plans/next.md")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/plans/next.md"), before)
+
+    def test_update_inserts_a_missing_block_in_next_md(self):
+        self.new("graphify")
+        original = self.read("docs/plans/next.md")
+        lines, begin, end = self.block_lines("docs/plans/next.md", "graphify", "plan-discovery")
+        self.write("docs/plans/next.md", "\n".join(lines[:begin] + lines[end + 1:]))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("module:graphify slot:plan-discovery", self.read("docs/plans/next.md"))
+
+    def test_add_skips_project_created_files(self):
+        self.new("claude")
+        self.write("docs/plans/0001-old.md", self.OLD_PLAN)
+        code, out, err = run(["--add", "graphify", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/plans/0001-old.md"), self.OLD_PLAN)
+        self.assertIn("module:graphify slot:plan-discovery", self.read("docs/plans/next.md"))
+
+    def test_add_fails_when_only_a_project_created_file_has_the_marker(self):
+        self.new("claude")
+        text = self.read("docs/plans/next.md")
+        self.write("docs/plans/next.md",
+                   text.replace("<!-- @module-slot: plan-discovery -->\n", ""))
+        self.write("docs/plans/0001-old.md", self.OLD_PLAN)
+        code, out, err = run(["--add", "graphify", "--dir", self.target()])
+        self.assertNotEqual(code, 0)
+        self.assertIn("plan-discovery", err)
+        self.assertEqual(self.read("docs/plans/0001-old.md"), self.OLD_PLAN)
+
     def test_projects_grown_by_add_are_stable(self):
         self.new("claude")
         for name in ("graphify", "cad", "cad-freecad", "formal"):

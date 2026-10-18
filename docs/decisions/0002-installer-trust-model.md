@@ -205,3 +205,14 @@ a skipped file keeps its blocks and the run says so.
 `--add`, `--update` and `--remove`. Each value is still split on commas, so the
 rule above is unchanged: a `--with` path containing a comma is split and fails
 closed. No read or write boundary changes.
+
+## Addendum 2026-10-18: files that `--update` and `--add` patch
+
+`--update` and `--add` patch module blocks only in files the template ships: the
+`base/` paths and the `files/` of each installed built-in module, compared
+case-folded. A file the project created, such as a completed plan copied from
+`next.md`, is never patched even when it holds a slot marker or a block. In
+`docs/plans/next.md`, `--update` inserts a missing block but keeps the body of one
+already present, since that text is filled in per plan. `--remove` is unchanged: it
+strips the removed module's blocks from every scanned file, so no orphaned block
+remains. No read or write boundary changes.

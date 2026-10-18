@@ -70,7 +70,11 @@ with this checkout. It never commits.
 
 - **Blocks** (`BEGIN/END module:<name> slot:<slot>`) are replaced with the module's
   current fragment, and a fragment with a marker but no block is inserted. Edit
-  outside the blocks: an edit inside one is overwritten.
+  outside the blocks: an edit inside one is overwritten. Two exceptions: only files
+  the template ships (`base/` and the modules' files) are touched, so your own files,
+  such as completed plans, are never patched; and blocks already in
+  `docs/plans/next.md` are kept as written, because you fill them in per plan.
+  `--add` likewise inserts fragments only into files the template ships.
 - **Module files** that are missing are written. A file that exists and differs is
   kept and reported, because the manifest records no baseline to tell your edits from
   an older template.

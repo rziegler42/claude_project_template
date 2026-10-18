@@ -28,6 +28,7 @@ ROOT = os.path.dirname(os.path.realpath(__file__))
 BASE_DIR = os.path.join(ROOT, "base")
 MODULES_DIR = os.path.join(ROOT, "modules")
 MANIFEST = ".template-manifest"
+PLAN_FILE = "docs/plans/next.md"
 SCHEMA = 1
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
@@ -686,11 +687,12 @@ def _content(text):
     return [line for line in text.split("\n") if line.strip()]
 
 
-def refresh_blocks(text, order, fresh, relpath, drop=(), expect=None):
+def refresh_blocks(text, order, fresh, relpath, drop=(), expect=None, keep=False):
     """Return (text, blocks, used) with module blocks re-rendered from `fresh`.
 
     `fresh` maps module -> {slot: fragment}; other blocks keep their recorded
-    body, and modules in `drop` lose theirs. Refuses (ValueError) a layout that
+    body, and modules in `drop` lose theirs. With `keep`, a block already in the
+    text keeps its body and `fresh` only fills the ones that are missing. Refuses (ValueError) a layout that
     does not render back to itself, a kept block with no place left, or a
     dropped block whose body differs from `expect[module][slot]` when given.
     """
@@ -715,7 +717,10 @@ def refresh_blocks(text, order, fresh, relpath, drop=(), expect=None):
             )
     merged = {module: dict(slots) for module, slots in recorded.items()}
     for module, slots in fresh.items():
-        merged.setdefault(module, {}).update(slots)
+        have = merged.setdefault(module, {})
+        for slot, fragment in slots.items():
+            if not keep or slot not in have:
+                have[slot] = fragment
     for module in drop:
         merged.pop(module, None)
     new_text, used, _ = render(merged)
@@ -1218,6 +1223,16 @@ def cmd_unregister(args, out):
     return 0
 
 
+def owned_paths(modules, names):
+    """Casefolded paths the template ships: the base plus the files of `names`."""
+    owned = {rel.casefold() for rel in collect_tree(BASE_DIR)}
+    for name in names:
+        if name in modules:
+            owned |= {rel.casefold() for rel in
+                      collect_tree(os.path.join(modules[name]["path"], "files"))}
+    return owned
+
+
 def cmd_add(args, out):
     modules = load_modules()
     project = os.path.abspath(args.dir)
@@ -1265,10 +1280,13 @@ def cmd_add(args, out):
         for rel, reason in sorted(skipped):
             out("  %s (%s)" % (rel, reason))
     existing.update(writes)
+    owned = owned_paths(modules, [n for n in wanted if n not in externals])
     fragments = {name: modules[name]["slots"] for name in wanted}
     patched = dict()
     used = set()
     for rel, data in existing.items():
+        if rel.casefold() not in owned:
+            continue
         if not is_text(data) or b"@module-slot:" not in data:
             continue
         text = data.decode("utf-8")
@@ -1394,15 +1412,20 @@ def cmd_update(args, out):
     fresh = {name: modules[name]["slots"] for name in targets}
     fresh.update({name: meta["slots"] for name, meta in changed.items()})
     wanted = {(n, s) for n in fresh for s in fresh[n]}
+    owned = owned_paths(modules, present)
     placed = set()
     seen = set()
     for rel in sorted(files):
         data = files[rel]
+        if rel.casefold() not in owned:
+            continue
         if not is_text(data) or not (b"@module-slot:" in data or b"BEGIN module:" in data):
             continue
         text = data.decode("utf-8")
         try:
-            new_text, blocks, used = refresh_blocks(text, order, fresh, rel)
+            new_text, blocks, used = refresh_blocks(
+                text, order, fresh, rel, keep=rel == PLAN_FILE
+            )
         except (ValueError, InstallError) as exc:
             notes.append("%s: not updated (%s)" % (rel, exc))
             continue
