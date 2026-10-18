@@ -870,6 +870,23 @@ class InstallerTest(unittest.TestCase):
                       tree["docs/plans/README.md"])
         self.assertIn("plan-review: ", out)
 
+    def test_plan_review_guidance_covers_specs_and_roadmaps(self):
+        self.new("plan-review")
+        agents = read_tree(self.target())["AGENTS.md"]
+        for phrase in ("docs/specs/", "docs/roadmaps/", "at any status",
+                       "does not change the document's status", "only edit the document under review",
+                       "fresh review"):
+            self.assertIn(phrase, agents)
+        self.assertNotIn("ask-codex", agents)
+
+    def test_codex_guidance_names_the_spec_and_roadmap_commands(self):
+        self.new("codex")
+        agents = read_tree(self.target())["AGENTS.md"]
+        for phrase in ("ask-codex review-spec --spec", "ask-codex review-roadmap --roadmap",
+                       "`--spec`", "`--roadmap`", "docs/specs/", "docs/roadmaps/",
+                       "never run `archive` to get around a bound"):
+            self.assertIn(phrase, agents)
+
     def test_plan_review_text_absent_without_the_module(self):
         self.new("graphify,cad")
         tree = read_tree(self.target())
