@@ -277,7 +277,10 @@ store is a sibling of the project, otherwise the absolute path, and no other for
 accepted. A full `--update` re-verifies each registered store and rewrites its entry
 even when the descriptor is unchanged, so a moved store or an older manifest is
 corrected; a store it cannot verify keeps its entry. An absolute `store` is specific
-to one machine, so prefer keeping the project and the store side by side.
+to one machine, so prefer keeping the project and the store side by side. An installer
+from before external entries refuses a project whose manifest has them (it fails closed
+with a "malformed" error and writes nothing), so update the template checkout before
+running it on such a project.
 
 ```json
 "module_info": { "my_kb": { "store": "../my_kb", "type": "knowledge-base",

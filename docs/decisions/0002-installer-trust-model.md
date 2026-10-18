@@ -297,3 +297,11 @@ line. A consumer resolves a relative `store` against the project root, applies t
 machine-specific and can expose a home directory name; the sibling form avoids both.
 External entries are validated against `external_modules` and the external name pattern,
 built-in entries against `modules` and the built-in pattern.
+
+Compatibility with older installers differs from the other optional keys above. An
+installer that predates external `module_info` accepts only entries named in `modules`,
+and one that predates format 2 refuses format 2 in `external_modules`. Either one refuses
+a manifest whose external modules have entries (exit 2, "malformed"), writes nothing, and
+cannot `--add`, `--update` or `--remove` in that project until it is upgraded. It fails
+closed rather than ignoring the key. The costs were accepted because no project depended
+on the earlier `module_info` shape. Built-in-only manifests are unaffected.
