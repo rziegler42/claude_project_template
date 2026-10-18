@@ -6,6 +6,9 @@ Usage:
              [--git-name N --git-email E | --use-global-git-identity]
   install.py --list
   install.py --add <module|name=PATH>... [--dir DIR]
+  install.py --register PATH [--name N] [--dry-run]
+  install.py --unregister NAME
+  (--registry FILE overrides the registry location for any of the above)
 
 `name=PATH` installs the slot fragments of a standalone project that ships a
 `template-module/` descriptor; see docs/specs/external-modules.md.
@@ -36,6 +39,8 @@ EXTERNAL_ORDER = 1000000
 DESCRIPTION_MAX = 200
 FRAGMENT_MAX_BYTES = 64 * 1024
 FRAGMENT_MAX_COUNT = 16
+REGISTRY_SCHEMA = 1
+MAX_REGISTRY_BYTES = 1024 * 1024
 FRAGMENT_FORBIDDEN = ("@module-slot:", "BEGIN module:", "END module:")
 SLOT_RE = re.compile(
     r"^(?P<open><!--|#)\s*@module-slot:\s*(?P<slot>[a-z0-9-]+)\s*(?P<close>-->)?\s*$"
@@ -184,7 +189,7 @@ def read_external(name, value, target, builtin):
         raise InstallError(
             "module %s: store must not be, contain, or be inside the template repository" % name
         )
-    if is_within(store, target) or is_within(target, store):
+    if target is not None and (is_within(store, target) or is_within(target, store)):
         raise InstallError(
             "module %s: store must not be, contain, or be inside the target project" % name
         )
@@ -229,8 +234,11 @@ def read_external(name, value, target, builtin):
         raw_slots[slot] = read_regular(os.path.join(slot_dir, entry), FRAGMENT_MAX_BYTES)
     if len(raw_slots) > FRAGMENT_MAX_COUNT:
         raise InstallError("module %s: more than %d fragments" % (name, FRAGMENT_MAX_COUNT))
-    parent = os.path.realpath(os.path.dirname(os.path.abspath(target)))
-    where = "../" + os.path.basename(store) if os.path.dirname(store) == parent else store
+    where = store
+    if target is not None:
+        parent = os.path.realpath(os.path.dirname(os.path.abspath(target)))
+        if os.path.dirname(store) == parent:
+            where = "../" + os.path.basename(store)
     slots = {}
     for slot in sorted(raw_slots):
         if not is_text(raw_slots[slot]):
@@ -251,13 +259,21 @@ def read_external(name, value, target, builtin):
     }
 
 
-def load_externals(entries, target, builtin):
+def load_externals(entries, target, builtin, registered=()):
     """Load every `name=path` entry; names and real paths must be unique."""
     loaded, paths = {}, {}
     for name, value in entries:
         if name in loaded:
             raise InstallError("module %s given more than once" % name)
-        meta = load_external(name, value, target, builtin)
+        try:
+            meta = load_external(name, value, target, builtin)
+        except InstallError as exc:
+            if name in registered:
+                raise InstallError(
+                    "%s (registered store %s: if it moved or changed, unregister it and "
+                    "register it again)" % (exc, name)
+                )
+            raise
         if meta["path"] in paths:
             raise InstallError(
                 "modules %s and %s name the same store" % (paths[meta["path"]], name)
@@ -265,6 +281,111 @@ def load_externals(entries, target, builtin):
         paths[meta["path"]] = name
         loaded[name] = meta
     return loaded
+
+
+def registry_path(override=None):
+    """The registry file: the override, else under $XDG_CONFIG_HOME (absolute) or ~/.config."""
+    if override is not None:
+        if not override:
+            raise InstallError("--registry needs a file name")
+        return os.path.abspath(os.path.expanduser(override))
+    base = os.environ.get("XDG_CONFIG_HOME", "")
+    if not (base and os.path.isabs(base)):
+        base = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "claude-project-template", "registry.json")
+
+
+def malformed_registry(path, why):
+    return InstallError("registry %s is malformed (%s)" % (path, why))
+
+
+def load_registry(path):
+    """Return {name: absolute path}; a missing file is an empty registry."""
+    parent = os.path.dirname(path)
+    if os.path.islink(parent):
+        raise InstallError("registry directory is a symlink: %s" % parent)
+    if not os.path.lexists(path):
+        return {}
+    raw = read_regular(path, MAX_REGISTRY_BYTES)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise malformed_registry(path, "not valid JSON")
+    if not isinstance(data, dict) or set(data) != {"schema", "stores"}:
+        raise malformed_registry(path, "expected an object with schema and stores")
+    if isinstance(data["schema"], bool) or data["schema"] != REGISTRY_SCHEMA:
+        raise malformed_registry(path, "unknown schema")
+    if not isinstance(data["stores"], dict):
+        raise malformed_registry(path, "stores is not an object")
+    stores = {}
+    for name, entry in data["stores"].items():
+        if not EXT_NAME_RE.match(name):
+            raise malformed_registry(path, "invalid store name")
+        if not isinstance(entry, dict) or set(entry) != {"path"}:
+            raise malformed_registry(path, "invalid store entry")
+        where = entry["path"]
+        if not (isinstance(where, str) and os.path.isabs(where) and where.isprintable()):
+            raise malformed_registry(path, "store path must be an absolute single line")
+        stores[name] = where
+    return stores
+
+
+def save_registry(path, stores):
+    parent = os.path.dirname(path)
+    if os.path.islink(parent):
+        raise InstallError("registry directory is a symlink: %s" % parent)
+    if os.path.lexists(path) and not stat.S_ISREG(os.lstat(path).st_mode):
+        raise InstallError("registry is not a regular file: %s" % path)
+    payload = {
+        "schema": REGISTRY_SCHEMA,
+        "stores": {name: {"path": stores[name]} for name in sorted(stores)},
+    }
+    data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    temp = "%s.tmp-%d" % (path, os.getpid())
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(temp, flags, 0o600), "wb") as handle:
+            handle.write(data)
+        os.replace(temp, path)
+    except OSError as exc:
+        raise InstallError("cannot write registry %s: %s" % (path, exc.strerror or exc))
+    finally:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+
+
+def registered_entries(args, entries, builtin):
+    """Fill in registered paths for bare names and check typed names against the registry.
+
+    Returns (entries, registered names). The registry is opened only when some
+    name is not a built-in module.
+    """
+    if all(name in builtin for name, _ in entries):
+        return entries, set()
+    stores = load_registry(registry_path(args.registry))
+    resolved, registered = [], set()
+    for name, value in entries:
+        if name in builtin:
+            resolved.append((name, value))
+        elif value is None:
+            if name not in stores:
+                raise InstallError(
+                    "unknown module %r (available: %s)"
+                    % (name, ", ".join(sorted(builtin | set(stores))))
+                )
+            resolved.append((name, stores[name]))
+            registered.add(name)
+        else:
+            if name in stores and os.path.realpath(os.path.expanduser(value)) != stores[name]:
+                raise InstallError(
+                    "module %s is registered at %s, not at the given path; use that path "
+                    "or unregister it first" % (name, stores[name])
+                )
+            resolved.append((name, value))
+    return resolved, registered
 
 
 def resolve(selected, modules):
@@ -787,10 +908,11 @@ def cmd_new(args, out):
         )
         selected = parse_with(answer)
     entries = parse_entries(selected)
-    externals = load_externals(
-        [(n, v) for n, v in entries if v is not None], target, set(modules)
-    )
     builtin = set(modules)
+    entries, registered = registered_entries(args, entries, builtin)
+    externals = load_externals(
+        [(n, v) for n, v in entries if v is not None], target, builtin, registered
+    )
     modules = dict(modules, **externals)
     selected = [n for n, _ in entries]
     names = resolve(selected, modules)
@@ -855,6 +977,74 @@ def cmd_list(args, out):
             flags.append("requires " + ",".join(meta["requires"]))
         suffix = " (%s)" % "; ".join(flags) if flags else ""
         out("%s%s: %s" % (name, suffix, meta["description"]))
+    stores = load_registry(registry_path(args.registry))  # after the built-ins, so they always show
+    if stores:
+        out("")
+        out("Registered stores:")
+        for name in sorted(stores):
+            path, text = stores[name], stores[name]
+            if name in modules:
+                status = "invalid: shadowed by a built-in module"
+            elif not os.path.lexists(path):
+                status = "missing"
+            else:
+                try:
+                    text = load_external(name, path, None, set(modules))["description"]
+                    status = "ok"
+                except InstallError as exc:
+                    status = "invalid: %s" % exc
+            out("  %s [%s]: %s" % (name, status, text))
+    return 0
+
+
+def cmd_register(args, out):
+    if not args.register:
+        raise InstallError("--register needs the path of a standalone project")
+    builtin = set(load_modules())
+    path = os.path.abspath(os.path.expanduser(args.register))
+    name = args.name or os.path.basename(path.rstrip(os.sep))
+    if not EXT_NAME_RE.match(name):
+        raise InstallError("%r is not a valid module name; pass --name" % name)
+    meta = load_external(name, args.register, None, builtin)
+    location = registry_path(args.registry)
+    stores = load_registry(location)
+    if stores.get(name) == meta["path"]:
+        out("%s is already registered at %s." % (name, meta["path"]))
+        return 0
+    if name in stores:
+        raise InstallError(
+            "%s is already registered at %s; unregister it first" % (name, stores[name])
+        )
+    for other, where in stores.items():
+        if where == meta["path"]:
+            raise InstallError(
+                "%s is already registered as %s; unregister it first" % (where, other)
+            )
+    if args.dry_run:
+        out("Would register %s -> %s (%s)" % (name, meta["path"], meta["description"]))
+        out("Dry run: nothing written.")
+        return 0
+    stores[name] = meta["path"]
+    save_registry(location, stores)
+    out("Registered %s -> %s" % (name, meta["path"]))
+    out("  %s" % meta["description"])
+    return 0
+
+
+def cmd_unregister(args, out):
+    name = args.unregister
+    if not name or not EXT_NAME_RE.match(name):
+        raise InstallError("invalid module name %r" % name)
+    if name in load_modules():
+        raise InstallError("%s is a built-in module, not a registered store" % name)
+    location = registry_path(args.registry)
+    stores = load_registry(location)
+    if name not in stores:
+        out("%s is not registered." % name)
+        return 0
+    del stores[name]
+    save_registry(location, stores)
+    out("Unregistered %s." % name)
     return 0
 
 
@@ -868,7 +1058,10 @@ def cmd_add(args, out):
     entries = parse_entries(args.add)
     # A recorded external module is never re-read: its store may have moved.
     fresh = [(n, v) for n, v in entries if n not in recorded]
-    externals = load_externals([(n, v) for n, v in fresh if v is not None], project, builtin)
+    fresh, registered = registered_entries(args, fresh, builtin)
+    externals = load_externals(
+        [(n, v) for n, v in fresh if v is not None], project, builtin, registered
+    )
     modules = dict(modules, **externals)
     wanted = resolve(list(installed) + [n for n, _ in fresh], modules)
     new = [name for name in wanted if name not in installed]
@@ -948,7 +1141,16 @@ def build_parser():
         "--with", dest="with_", default="",
         help="comma-separated modules; name=PATH installs a standalone project as module 'name'",
     )
-    parser.add_argument("--name", help="project name (default: target directory name)")
+    parser.add_argument(
+        "--name",
+        help="project name (default: target directory name); with --register, the registered "
+             "name (default: the store's directory name)",
+    )
+    parser.add_argument("--register", metavar="PATH",
+                        help="register a standalone project so its name works in --with and --add")
+    parser.add_argument("--unregister", metavar="NAME", help="remove a registered name")
+    parser.add_argument("--registry", metavar="FILE",
+                        help="registry file (default: ~/.config/claude-project-template/registry.json)")
     parser.add_argument("--dry-run", action="store_true", help="show what would be written")
     parser.add_argument("--git-name", help="local git user.name for the new repository")
     parser.add_argument("--git-email", help="local git user.email for the new repository")
@@ -976,8 +1178,20 @@ def main(argv=None, out=print):
     try:
         if args.skip_unsafe_entries and not args.add:
             raise InstallError("--skip-unsafe-entries applies to --add only")
+        registry_modes = (args.register is not None) + (args.unregister is not None)
+        if registry_modes and (
+            registry_modes > 1 or args.list or args.add or args.target or args.with_
+        ):
+            raise InstallError(
+                "--register and --unregister cannot be combined with each other, a target "
+                "directory, --list, --add, or --with"
+            )
         if args.list:
             return cmd_list(args, out)
+        if args.register is not None:
+            return cmd_register(args, out)
+        if args.unregister is not None:
+            return cmd_unregister(args, out)
         if args.add:
             return cmd_add(args, out)
         if not args.target:

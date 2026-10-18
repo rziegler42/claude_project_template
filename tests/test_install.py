@@ -94,6 +94,7 @@ class InstallerTest(unittest.TestCase):
         self.saved = dict(os.environ)
         os.environ["GIT_CONFIG_GLOBAL"] = gitconfig
         os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.work, "xdg")
         self.addCleanup(self._restore_env)
 
     def _restore_env(self):
@@ -981,7 +982,8 @@ class InteractivePromptTest(unittest.TestCase):
         with open(gitconfig, "w") as handle:
             handle.write("[user]\n\tname = Sentinel Global\n\temail = %s\n" % SENTINEL_EMAIL)
         self.env = dict(os.environ, HOME=self.work, GIT_CONFIG_GLOBAL=gitconfig,
-                        GIT_CONFIG_SYSTEM=os.devnull)
+                        GIT_CONFIG_SYSTEM=os.devnull,
+                        XDG_CONFIG_HOME=os.path.join(self.work, "xdg"))
 
     def run_install(self, argv, keystrokes):
         return run_pty(argv, keystrokes, self.work, self.env)
@@ -1096,6 +1098,7 @@ class ExternalModuleTest(unittest.TestCase):
         self.saved = dict(os.environ)
         os.environ["GIT_CONFIG_GLOBAL"] = gitconfig
         os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.work, "xdg")
         self.addCleanup(self._restore_env)
         self.builtin = set(install.load_modules())
 
@@ -1531,6 +1534,435 @@ class ExternalModuleTest(unittest.TestCase):
                                   extra=["--skip-unsafe-entries"])
         self.assertEqual(code, 0, err)
         self.assertIn("linked", out)
+
+
+class RegistryTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        gitconfig = os.path.join(self.work, "global.gitconfig")
+        with open(gitconfig, "w") as handle:
+            handle.write("[user]\n\tname = Sentinel Global\n\temail = %s\n" % SENTINEL_EMAIL)
+        self.saved = dict(os.environ)
+        os.environ["GIT_CONFIG_GLOBAL"] = gitconfig
+        os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        os.environ["HOME"] = self.work
+        os.environ.pop("XDG_CONFIG_HOME", None)
+        self.addCleanup(self._restore_env)
+        self.reg = os.path.join(self.work, "cfg", "registry.json")
+        self.builtin = set(install.load_modules())
+
+    def _restore_env(self):
+        os.environ.clear()
+        os.environ.update(self.saved)
+
+    def store(self, **kwargs):
+        return make_store(self.work, **kwargs)
+
+    def target(self, name="proj"):
+        return os.path.join(self.work, name)
+
+    def stores(self):
+        if not os.path.exists(self.reg):
+            return {}
+        with open(self.reg) as handle:
+            return {n: e["path"] for n, e in json.load(handle)["stores"].items()}
+
+    def write_registry(self, raw, path=None):
+        path = path or self.reg
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(raw if isinstance(raw, bytes) else json.dumps(raw).encode())
+
+    def register(self, *argv):
+        return run(["--register"] + list(argv) + ["--registry", self.reg])
+
+    def new(self, with_, name="proj"):
+        return run([self.target(name), "--with", with_, "--registry", self.reg,
+                    "--git-name", "Test User", "--git-email", "tester@users.noreply.example.invalid"])
+
+    def add(self, *entries, name="proj"):
+        return run(["--add"] + list(entries) + ["--dir", self.target(name), "--registry", self.reg])
+
+    # -- Increment A: the registry file -------------------------------
+
+    def test_registry_path_default_and_xdg(self):
+        default = os.path.join(self.work, ".config", "claude-project-template", "registry.json")
+        self.assertEqual(install.registry_path(), default)
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.work, "xdg")
+        self.assertEqual(
+            install.registry_path(),
+            os.path.join(self.work, "xdg", "claude-project-template", "registry.json"),
+        )
+        os.environ["XDG_CONFIG_HOME"] = "relative/dir"
+        self.assertEqual(install.registry_path(), default)
+        self.assertEqual(install.registry_path(self.reg), self.reg)
+
+    def test_empty_registry_override_is_refused(self):
+        with self.assertRaises(install.InstallError):
+            install.registry_path("")
+
+    def test_load_missing_is_empty(self):
+        self.assertEqual(install.load_registry(self.reg), {})
+
+    def test_save_then_load_round_trips(self):
+        install.save_registry(self.reg, {"b_kb": "/abs/b", "a_kb": "/abs/a"})
+        with open(self.reg) as handle:
+            self.assertEqual(
+                json.load(handle),
+                {"schema": 1, "stores": {"a_kb": {"path": "/abs/a"}, "b_kb": {"path": "/abs/b"}}},
+            )
+        self.assertEqual(os.stat(os.path.dirname(self.reg)).st_mode & 0o077, 0)
+        self.assertEqual(install.load_registry(self.reg), {"a_kb": "/abs/a", "b_kb": "/abs/b"})
+
+    def test_load_refuses_malformed_registries(self):
+        good = {"schema": 1, "stores": {"kb": {"path": "/abs/kb"}}}
+        cases = {
+            "invalid json": b"{",
+            "not an object": [],
+            "schema 2": dict(good, schema=2),
+            "schema true": dict(good, schema=True),
+            "unknown top-level key": dict(good, extra=1),
+            "stores not an object": {"schema": 1, "stores": []},
+            "bad name": {"schema": 1, "stores": {"Bad": {"path": "/abs/x"}}},
+            "name with newline": {"schema": 1, "stores": {"kb\n": {"path": "/abs/x"}}},
+            "entry not an object": {"schema": 1, "stores": {"kb": "/abs/x"}},
+            "entry unknown key": {"schema": 1, "stores": {"kb": {"path": "/abs/x", "x": 1}}},
+            "relative path": {"schema": 1, "stores": {"kb": {"path": "rel/x"}}},
+            "multi-line path": {"schema": 1, "stores": {"kb": {"path": "/abs/x\ny"}}},
+            "oversized": b" " * (1024 * 1024 + 1),
+        }
+        for label, raw in cases.items():
+            with self.subTest(case=label):
+                path = os.path.join(self.work, label.replace(" ", "_"), "registry.json")
+                self.write_registry(raw, path)
+                with self.assertRaises(install.InstallError) as ctx:
+                    install.load_registry(path)
+                self.assertIn("registry", str(ctx.exception))
+
+    def test_load_and_save_refuse_symlinks_and_special_files(self):
+        real = os.path.join(self.work, "real")
+        self.write_registry({"schema": 1, "stores": {}}, os.path.join(real, "registry.json"))
+        link_dir = os.path.join(self.work, "link-dir")
+        os.symlink(real, link_dir)
+        link_file_dir = os.path.join(self.work, "file-link")
+        os.makedirs(link_file_dir)
+        os.symlink(os.path.join(real, "registry.json"), os.path.join(link_file_dir, "registry.json"))
+        fifo_dir = os.path.join(self.work, "fifo")
+        os.makedirs(fifo_dir)
+        os.mkfifo(os.path.join(fifo_dir, "registry.json"))
+        dir_dir = os.path.join(self.work, "dirdir")
+        os.makedirs(os.path.join(dir_dir, "registry.json"))
+        for label, folder in (("dir", link_dir), ("file", link_file_dir),
+                              ("fifo", fifo_dir), ("directory", dir_dir)):
+            path = os.path.join(folder, "registry.json")
+            with self.subTest(case=label, op="load"):
+                with self.assertRaises(install.InstallError):
+                    install.load_registry(path)
+            with self.subTest(case=label, op="save"):
+                with self.assertRaises(install.InstallError):
+                    install.save_registry(path, {"kb": "/abs/kb"})
+        with open(os.path.join(real, "registry.json")) as handle:
+            self.assertEqual(json.load(handle), {"schema": 1, "stores": {}})
+
+    # -- Increment B: --register and --unregister ---------------------
+
+    def test_register_defaults_name_to_directory_name(self):
+        store = self.store()
+        code, out, err = self.register(store)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.stores(), {"my_kb": os.path.realpath(store)})
+        self.assertIn("my_kb", out)
+        self.assertIn("Fixture store", out)
+
+    def test_register_name_override_tilde_and_relative(self):
+        store = self.store()
+        self.assertEqual(self.register(store, "--name", "work_kb")[0], 0)
+        third = self.store(name="third")
+        self.assertEqual(self.register("~/third")[0], 0)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.work)
+        fourth = self.store(name="fourth")
+        self.assertEqual(self.register("fourth")[0], 0)
+        self.assertEqual(
+            self.stores(),
+            {"work_kb": os.path.realpath(store), "third": os.path.realpath(third),
+             "fourth": os.path.realpath(fourth)},
+        )
+
+    def test_register_same_name_same_path_is_noop(self):
+        store = self.store()
+        self.assertEqual(self.register(store)[0], 0)
+        with open(self.reg, "rb") as handle:
+            before = handle.read()
+        code, out, err = self.register(store)
+        self.assertEqual(code, 0, err)
+        with open(self.reg, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_register_refusals_leave_registry_unchanged(self):
+        store = self.store()
+        other = self.store(name="other")
+        self.assertEqual(self.register(store)[0], 0)
+        with open(self.reg, "rb") as handle:
+            before = handle.read()
+        elsewhere = os.path.join(self.work, "elsewhere")
+        os.makedirs(elsewhere)
+        same_name_elsewhere = make_store(elsewhere, name="my_kb")
+        bad_dir = make_store(self.work, name="bad dir")
+        bad_store = os.path.join(self.work, "bare")
+        os.makedirs(bad_store)
+        linked = os.path.join(self.work, "linked")
+        os.symlink(store, linked)
+        cases = {
+            "same name other path": ([same_name_elsewhere], "my_kb"),
+            "same path other name": ([store, "--name", "second"], "my_kb"),
+            "builtin name": ([other, "--name", "cad"], "built-in"),
+            "bad directory name": ([bad_dir], "--name"),
+            "no descriptor": ([bad_store, "--name", "bare_kb"], "template-module"),
+            "symlinked store": ([linked, "--name", "link_kb"], "symlink"),
+            "inside template": ([os.path.join(install.ROOT, "modules"), "--name", "tpl"], "template"),
+        }
+        for label, (argv, needle) in cases.items():
+            with self.subTest(case=label):
+                code, out, err = self.register(*argv)
+                self.assertEqual(code, 2, out)
+                self.assertIn(needle, err)
+                with open(self.reg, "rb") as handle:
+                    self.assertEqual(handle.read(), before)
+        self.assertIn("unregister", self.register(same_name_elsewhere)[2])
+
+    def test_register_dry_run_writes_nothing(self):
+        store = self.store()
+        code, out, err = self.register(store, "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(os.path.dirname(self.reg)))
+        self.assertIn("Dry run", out)
+
+    def test_register_and_unregister_leave_the_store_untouched(self):
+        store = self.store()
+        os.makedirs(os.path.join(store, ".git"))
+        before = tree_hash(store)
+        self.assertEqual(self.register(store)[0], 0)
+        self.assertEqual(self.register(store, "--dry-run")[0], 0)
+        self.assertEqual(tree_hash(store), before)
+        self.assertEqual(run(["--unregister", "my_kb", "--registry", self.reg])[0], 0)
+        self.assertEqual(tree_hash(store), before)
+        self.assertEqual(self.stores(), {})
+
+    def test_unregister_works_when_the_store_is_gone(self):
+        import shutil
+        store = self.store()
+        self.assertEqual(self.register(store)[0], 0)
+        shutil.rmtree(store)
+        code, out, err = run(["--unregister", "my_kb", "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.stores(), {})
+
+    def test_unregister_unknown_succeeds_and_builtin_is_refused(self):
+        code, out, err = run(["--unregister", "no_such", "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+        self.assertIn("not registered", out)
+        self.assertEqual(run(["--unregister", "cad", "--registry", self.reg])[0], 2)
+
+    def test_unregister_keeps_existing_projects(self):
+        store = self.store()
+        self.assertEqual(self.register(store)[0], 0)
+        self.assertEqual(self.new("my_kb")[0], 0)
+        before = read_tree(self.target())
+        self.assertEqual(run(["--unregister", "my_kb", "--registry", self.reg])[0], 0)
+        self.assertEqual(read_tree(self.target()), before)
+
+    def test_mode_flags_are_exclusive(self):
+        store = self.store()
+        for argv in (
+            ["--register", store, self.target()],
+            ["--register", store, "--with", "cad"],
+            ["--register", store, "--list"],
+            ["--register", store, "--add", "cad"],
+            ["--unregister", "my_kb", "--list"],
+            ["--unregister", "my_kb", "--register", store],
+            ["--register", store, "--dir", self.work, "--with", "cad"],
+        ):
+            with self.subTest(argv=argv):
+                self.assertEqual(run(argv + ["--registry", self.reg])[0], 2)
+        self.assertFalse(os.path.exists(self.reg))
+
+    def test_old_list_and_add_precedence_is_unchanged(self):
+        self.assertEqual(self.new("graphify")[0], 0)
+        listing = run(["--list", "--registry", self.reg])[1]
+        for argv in (
+            [self.target("other"), "--list"],
+            ["--list", "--with", "cad"],
+            ["--list", "--add", "cad"],
+        ):
+            with self.subTest(argv=argv):
+                code, out, err = run(argv + ["--registry", self.reg])
+                self.assertEqual((code, out), (0, listing), err)
+        code, out, err = run([self.target("other"), "--add", "cad", "--dir", self.target(),
+                              "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+        self.assertIn("cad", self.manifest_modules())
+
+    def manifest_modules(self, name="proj"):
+        with open(os.path.join(self.target(name), ".template-manifest")) as handle:
+            return json.load(handle)["modules"]
+
+    def test_empty_register_and_unregister_values_are_refused(self):
+        for argv in (["--register", ""], ["--unregister", ""]):
+            with self.subTest(argv=argv):
+                self.assertEqual(run(argv + ["--registry", self.reg])[0], 2)
+        self.assertFalse(os.path.exists(self.reg))
+
+    def test_register_missing_path_is_refused(self):
+        code, out, err = self.register(os.path.join(self.work, "nope"))
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.reg))
+
+    def test_register_and_unregister_refuse_a_symlinked_registry(self):
+        real = os.path.join(self.work, "real")
+        os.makedirs(real)
+        os.symlink(real, os.path.join(self.work, "cfg"))
+        store = self.store()
+        self.assertEqual(self.register(store)[0], 2)
+        self.assertEqual(run(["--unregister", "my_kb", "--registry", self.reg])[0], 2)
+        self.assertEqual(os.listdir(real), [])
+
+    def test_register_without_registry_flag_writes_the_default_location(self):
+        store = self.store()
+        code, out, err = run(["--register", store])
+        self.assertEqual(code, 0, err)
+        default = os.path.join(self.work, ".config", "claude-project-template", "registry.json")
+        with open(default) as handle:
+            self.assertEqual(sorted(json.load(handle)["stores"]), ["my_kb"])
+
+    def test_list_with_malformed_registry_still_shows_built_ins_then_fails(self):
+        self.write_registry(b"{")
+        code, out, err = run(["--list", "--registry", self.reg])
+        self.assertEqual(code, 2)
+        self.assertIn("graphify:", out)
+        self.assertIn(self.reg, err)
+
+    # -- Increment C: --list, bare names, collisions ------------------
+
+    def test_list_without_registry_is_unchanged(self):
+        code, out, err = run(["--list", "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Registered stores", out)
+        self.assertEqual(out, run(["--list"])[1])
+
+    def test_list_shows_registered_stores_with_status(self):
+        import shutil
+        ok = self.store(name="ok_kb")
+        gone = self.store(name="gone_kb")
+        broken = self.store(name="broken_kb")
+        linked_target = self.store(name="real_kb")
+        for store in (ok, gone, broken, linked_target):
+            self.assertEqual(self.register(store)[0], 0)
+        self.write_registry({"schema": 1, "stores": dict(
+            {n: {"path": p} for n, p in self.stores().items()},
+            graphify={"path": ok},
+        )})
+        shutil.rmtree(gone)
+        os.unlink(os.path.join(broken, "template-module", "module.json"))
+        shutil.rmtree(linked_target)
+        os.symlink(ok, linked_target)
+        code, out, err = run(["--list", "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+        lines = {line.split()[0]: line for line in out.split("Registered stores:")[1].splitlines()
+                 if line.strip()}
+        self.assertIn("[ok]", lines["ok_kb"])
+        self.assertIn("Fixture store", lines["ok_kb"])
+        self.assertIn("[missing]", lines["gone_kb"])
+        self.assertIn("[invalid:", lines["broken_kb"])
+        self.assertIn("[invalid:", lines["real_kb"])
+        self.assertIn("shadowed by a built-in module", lines["graphify"])
+        self.assertIn("graphify:", out.split("Registered stores:")[0])
+
+    def test_with_registered_name_matches_typed_path(self):
+        store = self.store()
+        self.assertEqual(self.register(store)[0], 0)
+        self.assertEqual(self.new("graphify,my_kb")[0], 0)
+        self.assertEqual(self.new("graphify,my_kb=" + store, name="typed")[0], 0)
+        self.assertEqual(read_tree(self.target())["AGENTS.md"],
+                         read_tree(self.target("typed"))["AGENTS.md"])
+        with open(os.path.join(self.target(), ".template-manifest")) as one, \
+                open(os.path.join(self.target("typed"), ".template-manifest")) as two:
+            self.assertEqual(json.load(one)["external_modules"], json.load(two)["external_modules"])
+
+    def test_two_registered_stores_in_one_project(self):
+        for name in ("one", "two"):
+            self.assertEqual(self.register(self.store(name=name))[0], 0)
+        self.assertEqual(self.new("one,two")[0], 0)
+        agents = read_tree(self.target())["AGENTS.md"]
+        self.assertIn("BEGIN module:one slot:agents-guidance", agents)
+        self.assertIn("BEGIN module:two slot:agents-guidance", agents)
+
+    def test_add_registered_name(self):
+        self.assertEqual(self.register(self.store())[0], 0)
+        self.assertEqual(self.new("graphify")[0], 0)
+        code, out, err = self.add("my_kb")
+        self.assertEqual(code, 0, err)
+        self.assertIn("BEGIN module:my_kb slot:agents-guidance", read_tree(self.target())["AGENTS.md"])
+
+    def test_add_recorded_name_does_not_open_registry(self):
+        self.assertEqual(self.register(self.store())[0], 0)
+        self.assertEqual(self.new("my_kb")[0], 0)
+        self.write_registry(b"{")
+        code, out, err = self.add("my_kb")
+        self.assertEqual(code, 0, err)
+        self.assertIn("already installed", out)
+
+    def test_registered_name_with_a_different_typed_path_is_refused(self):
+        store = self.store()
+        other = self.store(name="other")
+        self.assertEqual(self.register(store)[0], 0)
+        code, out, err = self.new("my_kb=" + other)
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+        self.assertIn("registered at", err)
+        self.assertEqual(self.new("my_kb=" + store)[0], 0)
+
+    def test_builtin_only_run_never_opens_the_registry(self):
+        self.write_registry(b"{")
+        code, out, err = self.new("graphify,claude")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.add("cad")[0], 0)
+        os.unlink(self.reg)
+        os.symlink(self.work, self.reg)
+        self.assertEqual(self.new("cad", name="again")[0], 0)
+
+    def test_unknown_name_lists_registered_names(self):
+        self.assertEqual(self.register(self.store())[0], 0)
+        code, out, err = self.new("no_such")
+        self.assertEqual(code, 2)
+        self.assertIn("my_kb", err)
+        self.assertIn("cad", err)
+
+    def test_malformed_registry_error_names_the_file(self):
+        self.write_registry(b"{")
+        code, out, err = self.new("no_such")
+        self.assertEqual(code, 2)
+        self.assertIn(self.reg, err)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_registered_path_is_reverified_at_use(self):
+        import shutil
+        store = self.store()
+        self.assertEqual(self.register(store)[0], 0)
+        os.unlink(os.path.join(store, "template-module", "module.json"))
+        code, out, err = self.new("my_kb")
+        self.assertEqual(code, 2)
+        self.assertIn("module.json", err)
+        self.assertIn("register it again", err)
+        self.assertFalse(os.path.exists(self.target()))
+        shutil.rmtree(store)
+        os.symlink(self.work, store)
+        code, out, err = self.new("my_kb", name="second")
+        self.assertEqual(code, 2)
+        self.assertIn("symlink", err)
+        self.assertFalse(os.path.exists(self.target("second")))
 
 
 class ModuleHygieneTest(unittest.TestCase):
