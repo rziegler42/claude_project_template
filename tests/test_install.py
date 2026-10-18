@@ -3395,6 +3395,150 @@ class RemoveTest(ProjectCase):
             self.assertEqual(handle.read(), before)
 
 
+class ModuleInfoTest(ProjectCase):
+    KB = {"description": "kb", "type": "knowledge-base",
+          "paths": {"store": "docs/kb"}, "data": {"format": 1}}
+
+    def setUp(self):
+        super().setUp()
+        self.root = os.path.join(self.work, "info-modules")
+        self.module("kb", self.KB)
+        self.module("plain", {"description": "plain"})
+        saved = install.MODULES_DIR
+        install.MODULES_DIR = self.root
+        self.addCleanup(setattr, install, "MODULES_DIR", saved)
+
+    def module(self, name, meta):
+        os.makedirs(os.path.join(self.root, name), exist_ok=True)
+        with open(os.path.join(self.root, name, "module.json"), "w") as handle:
+            json.dump(meta, handle)
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def set_manifest(self, **changes):
+        manifest = self.manifest()
+        manifest.update(changes)
+        self.write(".template-manifest", json.dumps(manifest))
+
+    def test_new_records_only_declaring_modules(self):
+        self.assertEqual(self.new("kb,plain")[0], 0)
+        self.assertEqual(self.manifest()["module_info"], {
+            "kb": {"type": "knowledge-base", "paths": {"store": "docs/kb"},
+                   "data": {"format": 1}}})
+
+    def test_no_declaring_module_means_no_key(self):
+        self.assertEqual(self.new("plain")[0], 0)
+        self.assertNotIn("module_info", self.manifest())
+
+    def test_partial_declaration_records_only_what_is_declared(self):
+        self.module("kb", {"description": "kb", "type": "knowledge-base"})
+        self.assertEqual(self.new("kb")[0], 0)
+        self.assertEqual(self.manifest()["module_info"], {"kb": {"type": "knowledge-base"}})
+
+    def test_add_records_new_declaring_modules_and_keeps_others(self):
+        self.new("plain")
+        code, out, err = run(["--add", "kb", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(list(self.manifest()["module_info"]), ["kb"])
+        self.module("other", {"description": "o", "type": "other-kind"})
+        self.module("kb", dict(self.KB, data={"format": 2}))
+        code, out, err = run(["--add", "other", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        info = self.manifest()["module_info"]
+        self.assertEqual(info["kb"]["data"], {"format": 1})
+        self.assertEqual(info["other"], {"type": "other-kind"})
+
+    def test_remove_drops_the_entry_and_then_the_key(self):
+        self.new("kb,plain")
+        self.module("other", {"description": "o", "type": "other-kind"})
+        run(["--add", "other", "--dir", self.target()])
+        self.assertEqual(run(["--remove", "kb", "--dir", self.target()])[0], 0)
+        self.assertEqual(list(self.manifest()["module_info"]), ["other"])
+        self.assertEqual(run(["--remove", "other", "--dir", self.target()])[0], 0)
+        self.assertNotIn("module_info", self.manifest())
+
+    def test_full_update_refreshes_metadata_only_change(self):
+        self.new("kb,plain")
+        self.module("kb", dict(self.KB, paths={"store": "docs/kb", "index": "docs/kb/i.md"}))
+        before = self.manifest()
+        code, out, err = self.update("--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Nothing to update", out)
+        self.assertIn("would write .template-manifest", out)
+        self.assertEqual(self.manifest(), before)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Nothing to update", out)
+        self.assertEqual(self.manifest()["module_info"]["kb"]["paths"],
+                         {"store": "docs/kb", "index": "docs/kb/i.md"})
+
+    def test_full_update_adds_and_drops_entries(self):
+        self.new("kb,plain")
+        self.module("kb", {"description": "kb"})
+        self.assertEqual(self.update()[0], 0)
+        self.assertNotIn("module_info", self.manifest())
+        self.module("kb", self.KB)
+        self.assertEqual(self.update()[0], 0)
+        self.assertIn("kb", self.manifest()["module_info"])
+
+    def test_named_module_update_leaves_module_info(self):
+        self.new("kb,plain")
+        self.module("kb", dict(self.KB, data={"format": 9}))
+        before = self.read(".template-manifest")
+        code, out, err = self.update("plain")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Nothing to update", out)
+        self.assertEqual(self.read(".template-manifest"), before)
+
+    def test_unchanged_info_is_a_noop(self):
+        self.new("kb,plain")
+        before = tree_hash(self.target())
+        code, out, err = self.update()
+        self.assertIn("Nothing to update", out)
+        self.assertEqual(tree_hash(self.target()), before)
+
+    def test_entry_of_a_module_the_template_dropped_is_kept(self):
+        self.new("kb,plain")
+        before = self.manifest()["module_info"]
+        shutil.rmtree(os.path.join(self.root, "kb"))
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(self.manifest()["module_info"], before)
+
+    def test_older_manifest_without_the_key_loads(self):
+        self.new("plain")
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(run(["--add", "kb", "--dir", self.target()])[0], 0)
+
+    def test_hostile_module_info_is_refused_on_load(self):
+        self.new("kb,plain")
+        deep = {}
+        node = deep
+        for _ in range(8):
+            node["d"] = {}
+            node = node["d"]
+        bad_values = [
+            [], "x", {"kb": []}, {"kb": {}}, {"kb": {"extra": 1}},
+            {"kb": {"type": 5}}, {"kb": {"paths": {"s": "../x"}}},
+            {"kb": {"paths": {"s": "/abs"}}}, {"kb": {"data": deep}},
+            {"kb": {"data": {"k": "bell\x07"}}}, {"Bad Name": {"type": "x"}},
+            {"missing": {"type": "x"}},
+        ]
+        for bad in bad_values:
+            with self.subTest(bad=repr(bad)[:60]):
+                self.set_manifest(module_info=bad)
+                code, out, err = self.update()
+                self.assertEqual(code, 2)
+                self.assertIn("module_info", err)
+
+    def test_oversized_module_info_is_refused(self):
+        self.new("kb,plain")
+        self.set_manifest(module_info={"kb%d" % i: {"type": "t"}
+                                       for i in range(install.MANIFEST_MAP_MAX + 1)})
+        code, out, err = self.update()
+        self.assertEqual(code, 2)
+
+
 class ModuleHygieneTest(unittest.TestCase):
     def test_every_fragment_has_a_marker_in_some_file(self):
         modules = install.load_modules()

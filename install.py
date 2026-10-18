@@ -1237,7 +1237,7 @@ def safe_relpath(rel):
 
 
 def validate_optional_keys(manifest, builtin):
-    """Check the keys older manifests lack: project_name, module_commits, file_bases."""
+    """Check the keys older manifests lack: project_name, module_commits, file_bases, module_info."""
     name = manifest.get("project_name")
     commits = manifest.get("module_commits")
     bases = manifest.get("file_bases")
@@ -1252,9 +1252,16 @@ def validate_optional_keys(manifest, builtin):
         ok = ok and isinstance(bases, dict) and len(bases) <= MANIFEST_MAP_MAX and all(
             safe_relpath(k) and (v is None or (isinstance(v, str) and SHA_RE.match(v)))
             for k, v in bases.items())
+    if "module_info" in manifest:
+        info = manifest["module_info"]
+        ok = ok and isinstance(info, dict) and len(info) <= MANIFEST_MAP_MAX and all(
+            isinstance(k, str) and NAME_RE.match(k) and k in manifest["modules"]
+            and isinstance(v, dict) and v and set(v) <= set(INFO_KEYS)
+            and module_info_problem(v) is None
+            for k, v in info.items())
     if not ok:
-        raise InstallError("%s has a malformed project_name, module_commits or file_bases entry"
-                           % MANIFEST)
+        raise InstallError("%s has a malformed project_name, module_commits, file_bases or "
+                           "module_info entry" % MANIFEST)
 
 
 def load_manifest(project, builtin=()):
@@ -1292,7 +1299,18 @@ def external_record(meta):
     return {"module_format": meta["module_format"], "digest": meta["digest"]}
 
 
-def manifest_bytes(module_names, commit, dirty, externals=None, project_name=None):
+def module_info_for(modules, names):
+    """The type, paths and data each named built-in module declares, if any."""
+    info = {}
+    for name in sorted(names):
+        declared = {k: modules[name][k] for k in INFO_KEYS if k in modules[name]}
+        if declared:
+            info[name] = declared
+    return info
+
+
+def manifest_bytes(module_names, commit, dirty, externals=None, project_name=None,
+                   module_info=None):
     payload = {
         "schema": SCHEMA,
         "template_commit": commit,
@@ -1303,6 +1321,8 @@ def manifest_bytes(module_names, commit, dirty, externals=None, project_name=Non
         payload["external_modules"] = externals
     if project_name:
         payload["project_name"] = project_name
+    if module_info:
+        payload["module_info"] = module_info
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -1341,6 +1361,7 @@ def cmd_new(args, out):
         [n for n in names if n in builtin], commit, dirty,
         {n: external_record(modules[n]) for n in names if n in externals},
         project_name=name,
+        module_info=module_info_for(modules, [n for n in names if n in builtin]),
     )
 
     out("Project: %s" % name)
@@ -1554,6 +1575,10 @@ def cmd_add(args, out):
     if added:
         manifest["module_commits"] = added
     manifest["modules"] = sorted(n for n in wanted if n not in externals)
+    info = dict(manifest.get("module_info", {}))
+    info.update(module_info_for(modules, [n for n in new if n not in externals]))
+    if info:
+        manifest["module_info"] = info
     for name in externals:
         recorded[name] = external_record(externals[name])
     if recorded:
@@ -1896,9 +1921,21 @@ def cmd_update(args, out):
         out("  %s %s (%s)" % (verb, rel, why))
     for note in notes:
         out("  note: %s" % note)
-    if not writes and not changed:
+    info = manifest.get("module_info", {})
+    if not entries:
+        # Declared by the template, so a full run rebuilds it; a module the
+        # template no longer provides keeps what the manifest recorded.
+        info = {n: v for n, v in info.items() if n not in modules and n in installed}
+        info.update(module_info_for(modules, present))
+    info_changed = info != manifest.get("module_info", {})
+    if not writes and not changed and not info_changed:
         out("Nothing to update.")
         return 0
+    if info_changed:
+        if info:
+            manifest["module_info"] = info
+        else:
+            manifest.pop("module_info", None)
     unread = [r.casefold() for r, _ in skipped or ()]
     partial = bool(entries) or any(
         path == r or path.startswith(r + "/") for path in owned for r in unread
@@ -2042,6 +2079,11 @@ def cmd_remove(args, out):
     commit, dirty = template_state()
     manifest["template_commit"], manifest["template_dirty"] = commit, dirty
     manifest["modules"] = [n for n in installed if n not in names]
+    info = {n: v for n, v in manifest.get("module_info", {}).items() if n not in names}
+    if info:
+        manifest["module_info"] = info
+    else:
+        manifest.pop("module_info", None)
     for name in names:
         recorded.pop(name, None)
     if recorded:
