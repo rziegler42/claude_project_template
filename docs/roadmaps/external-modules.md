@@ -36,7 +36,7 @@ the template or the template carrying per-project knowledge.
 - Candidate 3 is complete (2026-10-18, plan
   [0008](../plans/0008-external-module-review.md)): two adversarial passes, findings
   fixed, ADR 0002 addendum, and [ADR 0003](../decisions/0003-external-module-mechanism.md)
-  (Proposed until the owner accepts it).
+  (Accepted 2026-10-18).
 - The sibling `claude_knowledge_base` is a generator that creates stores. Its
   roadmap (`knowledge-base-starter`, candidate 7) expects this integration; it
   will also drop `--add-to` and ship the descriptor. That work belongs to that
