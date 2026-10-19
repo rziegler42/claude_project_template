@@ -96,14 +96,14 @@ directory.
 **Boundary:** no change to `ask-codex`.
 **Promotion trigger:** candidate 4 complete.
 
-### 7. `formal`
+### 7. `formal` (template side done 2026-10-19, plan 0021)
 
 **Outcome:** `verilog-sby-formal` moves into the `formal` harness directory.
 **Dependencies:** 3.
 **Boundary:** one skill. `verilog-verilator-sim` has no module and stays global unless the owner adds
 a module for it.
-**Promotion trigger:** candidate 3 complete. Met. Promoted 2026-10-19: the template side is
-drafted in `docs/plans/next.md`; the global-configuration side is a separate plan in
+**Promotion trigger:** candidate 3 complete. Met. The template side is done (plan 0021); removing
+the global copy and rewording the global `CLAUDE.md` routing rule are separate work in
 `claude_global_config`.
 
 ### 8. External stores: registration review
