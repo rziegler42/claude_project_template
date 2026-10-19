@@ -102,7 +102,9 @@ directory.
 **Dependencies:** 3.
 **Boundary:** one skill. `verilog-verilator-sim` has no module and stays global unless the owner adds
 a module for it.
-**Promotion trigger:** candidate 3 complete.
+**Promotion trigger:** candidate 3 complete. Met. Promoted 2026-10-19: the template side is
+drafted in `docs/plans/next.md`; the global-configuration side is a separate plan in
+`claude_global_config`.
 
 ### 8. External stores: registration review
 
