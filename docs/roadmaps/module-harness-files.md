@@ -117,7 +117,7 @@ refused. Security-reviewed adversarially.
 **Boundary:** no model call and no network access by the installer.
 **Promotion trigger:** candidate 4 complete and the owner asks for store-shipped harness files. Met. Promoted 2026-10-19 and implemented as plan 0024.
 
-### 9. Knowledge-base stores
+### 9. Knowledge-base stores (done 2026-10-19, `claude_knowledge_base` plan 0008)
 
 **Outcome:** the starter ships the consuming `knowledge-base` skill in its harness directory;
 `knowledge-base-authoring` stays global. The starter's tool-neutral stance and the global
@@ -125,8 +125,9 @@ configuration's ADR 0008 are superseded for harness directories.
 **Dependencies:** 8.
 **Boundary:** coordinated with `claude_knowledge_base` and `claude_global_config`; the in-progress
 knowledge-base skills roadmap there is reviewed first.
-**Promotion trigger:** candidate 8 complete. Met. Promoted 2026-10-19; no plan is drafted in this
-repository, because the work lives in `claude_knowledge_base` and `claude_global_config`.
+**Promotion trigger:** candidate 8 complete. Met. Promoted 2026-10-19; no plan was drafted in this
+repository, because the work lived in `claude_knowledge_base`, which shipped the skill in its starter
+store (its plan 0008). The global copy of `knowledge-base` is removed under candidate 10.
 
 ### 10. Global configuration cleanup
 
