@@ -58,16 +58,15 @@ cover the harness files like other module files. Built-in modules only.
 **Promotion trigger:** candidate 1 complete. Met. Promoted 2026-10-19: the plan is drafted in
 `docs/plans/next.md` and waits for the owner's approval.
 
-### 3. Pilot: `cad-freecad` and `freecad-scripts`
+### 3. Pilot: `cad-freecad` and `freecad-scripts` (template side done 2026-10-19, plan 0019)
 
 **Outcome:** `cad-freecad/harness/claude/` carries the `freecad-scripts` skill; the global
 configuration drops it. It needs no helper, so it proves the mechanism alone. Spans both
 repositories as two plans.
 **Dependencies:** 2.
 **Boundary:** one module and one skill.
-**Promotion trigger:** candidate 2 complete. Met. Promoted 2026-10-19: the template side is
-drafted in `docs/plans/next.md`; the global-configuration side is a separate plan in
-`claude_global_config`.
+**Promotion trigger:** candidate 2 complete. Met. The template side is done (plan 0019); removing
+the global copy is a separate plan in `claude_global_config`, still open.
 
 ### 4. Declarations and reporting
 
