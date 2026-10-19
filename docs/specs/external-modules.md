@@ -1,7 +1,18 @@
 # External modules
 
 Status: Approved (2026-10-18)
-Updated: 2026-10-18
+Updated: 2026-10-19
+
+Amended by [ADR 0004](../decisions/0004-harness-files-in-modules.md) and the
+[module harness files specification](module-harness-files.md) (2026-10-19), which supersede these
+clauses and leave the rest unchanged: Non-goals, a `files/` directory is outside this version (also
+the harness tree is allowed, under approval); Descriptor, "no `harness` key" and "never
+harness-specific" (format 3 may carry a harness tree; fragments stay tool-neutral); Syntax and
+Verification, `name=path` needs no registry entry (except a store with a `harness/` tree);
+Registry, `--unregister` deletes the registry entry only (it also deletes the name's approval, and
+`--unapprove` removes the approval alone); Manifest, the digest covers `module.json` and fragments
+(format 3 adds the harness tree); Trust model and Acceptance 2 and 3 (add the harness tree and the
+approval record).
 
 Requirements for letting the template treat a standalone project, such as a
 knowledge-base store created by the sibling `claude_knowledge_base` installer, as

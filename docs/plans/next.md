@@ -1,6 +1,6 @@
 # Harness file specification and trust addendum
 
-Status: Approved
+Status: In Progress
 Created: 2026-10-19
 
 ## Goal

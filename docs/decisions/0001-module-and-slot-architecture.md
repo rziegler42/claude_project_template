@@ -59,6 +59,20 @@ repository may use different coding harnesses.
   checks the output tree, git state, identity handling, and neutrality (no
   harness-helper names outside harness modules).
 
+## Amended by 0004
+
+[ADR 0004](0004-harness-files-in-modules.md) and the
+[module harness files specification](../specs/module-harness-files.md) amend three clauses, with
+effect from 2026-10-19; the rest of this record is unchanged:
+
+- Decision, "Harness entry points (such as `CLAUDE.md`) are independent modules": module-owned
+  harness files install under a harness the project records. Entry-point modules keep working until
+  the roadmap retires `"harness": true`.
+- Alternatives, "A single harness selector" rejected: rejected for committed neutral content only; a
+  project records one harness for module-owned harness files.
+- Verification, no harness-helper names outside harness modules: the neutrality test exempts
+  `harness/` directories.
+
 ## Related files and decisions
 
 - `base/`, `modules/`, `install.py`

@@ -305,3 +305,72 @@ a manifest whose external modules have entries (exit 2, "malformed"), writes not
 cannot `--add`, `--update` or `--remove` in that project until it is upgraded. It fails
 closed rather than ignoring the key. The costs were accepted because no project depended
 on the earlier `module_info` shape. Built-in-only manifests are unaffected.
+
+## Addendum: harness files (ADR 0004)
+
+Accepted with [ADR 0004](0004-harness-files-in-modules.md) and the approved
+[specification](../specs/module-harness-files.md) on 2026-10-19. Nothing here is implemented
+yet; each mitigation below is covered by regression tests in the implementation plans. The
+decisions above are unchanged.
+
+A module may ship `harness/<harness>/`, installed into the project's harness root (`.claude/`) and,
+for a few table-listed entry points, the project root. Claude Code loads installed skills and agents
+automatically, so anyone who opens the project runs what they say. The owner's approval of an
+external store's files is therefore the control, and the installer's static findings are advisory.
+
+Trust model additions:
+
+- Untrusted data: every byte of an external store's `harness/` tree and `harness.json`, the
+  `harness`, `harness_files` and `schema` values in a project's `.template-manifest`, the approvals
+  file beside the registry, and the marker file. A store's harness files are read, never executed,
+  and no subprocess touches a store. A built-in module's harness tree is trusted as template code,
+  like its other files, and gets the same path and allowlist checks so a mistake fails loudly.
+- Trusted as intent only: the owner passing a digest to `--approve` after reviewing the listing the
+  installer printed for exactly those files.
+- Out of scope, as for fragments: the owner approving a store whose files are hostile guidance. A
+  review is evidence, not proof, and an approval guards new installs only: files already copied do
+  not change when the store does.
+- Permitted reads gain one location outside the target, the template, a store and the registry: the
+  harness marker file under the user's home directory, read as a regular file of at most 4 KiB.
+  `PATH` entries are inspected with `stat` to report whether a helper exists; no helper is run.
+- Permitted writes gain the harness root and the table's root-level entry-point files, inside the
+  target; and the approvals file beside the registry (`registry.json.approvals`), written like the
+  registry (mode 0700 directory, 0600 file, temporary sibling and rename).
+
+Mitigations, each to be covered by a regression test in the implementation plans:
+
+- Harness paths pass the same relative-path checks as other module files and are unique
+  case-folded. A symlink, special file, `.git` component or traversal in a tree is refused, with the
+  file count and tree size checked before any file is read.
+- Only table-listed top-level entries install. For an external store these are skills, agents and
+  commands as `.md` files; settings, hooks and MCP configuration are refused, so an approved store
+  cannot add a file the harness runs on open. Installed files are never executable and are not
+  protected from instructions that ask the model to run something: approval is the control, and
+  the owner confirms the harness's behaviour in its documentation.
+- Harness files cannot carry slot or block markers, and units whose frontmatter names collide are
+  refused, so a store cannot capture another module's fragments, block its own removal, or shadow
+  another unit.
+- An external store with a harness tree needs an approval bound to its canonical path and the
+  digest of the whole tree (including `harness.json`), checked before any write by `--new` and
+  `--add` of a new name and by a named `--update`; a full `--update` skips a changed store. A
+  `name=path` store carrying a harness tree is refused without one. `--remove` reads no store, no
+  registry and no approval.
+- A harness file is never overwritten; a differing existing file is reported as a conflict, and
+  a unit shipped by two suppliers with different content refuses the later one.
+- A manifest that records a harness has `schema` 2, so an installer from before this change refuses
+  it instead of ignoring the harness files. A format 3 store is likewise refused by an installer
+  that supports only formats 1 and 2. Manifests without a harness are unchanged.
+- `harness_files` is validated on load (entry count, safe relative paths, 64-hex digests, valid
+  module names), and removal deletes only a regular file whose SHA-256 equals the recorded value,
+  through the existing descriptor-relative delete.
+
+Accepted residuals:
+
+- A store changed between review and use is caught only by the digest check at use.
+- A concurrent local attacker can swap a store, the registry or the approvals file between the check
+  and the read, as for the registry above; approvals are last-writer-wins.
+- The installer does not verify that a file implements a declared worker role, and static findings
+  do not catch hostile instructions in plain language.
+- A project with a harness cannot be changed by an older installer until it is upgraded.
+- The marker is machine-local and can be forged by anyone with the owner's account; it only changes
+  what the installer reports, never what it installs.

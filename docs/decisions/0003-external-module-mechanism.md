@@ -86,6 +86,17 @@ behaviour; plans 0006 and 0007 implemented it; plan 0008 reviewed it adversarial
   The second pass found no bypass and no new traceback.
 - Accepted residuals: see the ADR 0002 addendum.
 
+## Amended by 0004
+
+[ADR 0004](0004-harness-files-in-modules.md) and the
+[module harness files specification](../specs/module-harness-files.md) amend two clauses, with
+effect from 2026-10-19; the rest of this record is unchanged:
+
+- Decision, "Slot fragments only: no `files/`, no `requires`": a store may also ship
+  `template-module/harness/<harness>/` (`module_format` 3), installed only under a registered,
+  approved digest. `files/` and `requires` stay excluded.
+- Alternatives, shipping files from stores deferred: narrowed to `files/`.
+
 ## Related files and decisions
 
 - `install.py`, `tests/test_install.py`, `docs/specs/external-modules.md`.

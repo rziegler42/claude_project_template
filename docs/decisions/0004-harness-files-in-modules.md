@@ -1,7 +1,8 @@
 # 0004: Harness files in modules
 
-Status: Proposed
+Status: Accepted
 Date: 2026-10-19
+Accepted: 2026-10-19, with the [specification](../specs/module-harness-files.md)
 
 ## Context
 
@@ -80,12 +81,14 @@ ADR 0008, which keeps the starter tool-neutral.
    Registration is the trust step, so a store with a `harness/` directory must be registered and
    approved before use: selecting it by `name=path` without an approval is refused before anything
    is written, and no other approval record exists. `--register` lists the harness files with sizes, a digest over
-   the whole set and the installer's static findings (symlinks, executables, size limits,
-   instruction-like phrases), and installs nothing. The owner reviews exactly those files, with a
-   security review, and approves by passing the digest back (`--approve <digest>`). The approval is
-   recorded in the registry, bound to the store's canonical path and the digest, and only files that
-   match it are ever installed; `--add`, `--update` and `--new` re-check the digest and refuse a
-   changed store until it is approved again. `--remove` needs no approval. The same skill name with
+   the whole set and the installer's static findings (executable files and instruction-like
+   phrases; symlinks, special files and size limits are refusals), and installs nothing. The owner
+   reviews exactly those files, with a security review, and approves by passing the digest back
+   (`--approve <digest>`). The approval is recorded in a file beside the registry (so an installer
+   from before this ADR keeps reading the registry), bound to the store's canonical path and the
+   digest, and only files that match it are ever installed; `--add` and `--new` re-check the digest
+   and refuse a changed store until it is approved again, a named `--update` refuses it, and a full
+   `--update` skips it and says so. `--remove` needs no approval. The same skill name with
    identical content installs once (the collision rule of decision 2); with different content it is
    refused. The installer runs no model and makes no network call.
 7. **The global configuration keeps what is cross-cutting:** skills and agents with no module
@@ -150,7 +153,7 @@ ADR 0008, which keeps the starter tool-neutral.
 
 ## Verification
 
-Not implemented. The roadmap [module-harness-files](../roadmaps/module-harness-files.md) orders the
+Not implemented; the specification is approved and fixes the points below. The roadmap [module-harness-files](../roadmaps/module-harness-files.md) orders the
 plans; each records its own evidence. The ADR fixes the contract's rules (selection, collision,
 approval binding and re-checking, fail-closed refusal by older installers, untrusted reads). The
 specification fixes names, shapes and numbers only: the harness root table and the refusal of an

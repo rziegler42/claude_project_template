@@ -11,8 +11,9 @@ This roadmap is direction only. It does not authorize work, change
 Let a module carry the harness-specific files that serve it (skills, agents, scripts), installed
 into a project's own harness directory instead of a developer's global configuration, with one
 mechanism for built-in and external modules. The decision is
-[ADR 0004](../decisions/0004-harness-files-in-modules.md), `Proposed`; nothing below starts
-before it is `Accepted`.
+[ADR 0004](../decisions/0004-harness-files-in-modules.md), `Accepted` 2026-10-19 with the
+approved [specification](../specs/module-harness-files.md). Candidate 1 is done; each later
+candidate still needs its own plan and the owner's promotion.
 
 ## Current state
 
@@ -36,14 +37,14 @@ before it is `Accepted`.
 
 ## Ordered plan candidates
 
-### 1. Specification and trust-model addendum
+### 1. Specification and trust-model addendum (done 2026-10-19)
 
 **Outcome:** an approved specification (`docs/specs/module-harness-files.md`) that fixes what the
 ADR leaves open (see its Verification), and the ADR 0002 addendum for harness files, the marker read
 and the approval. ADR 0004 is accepted with it.
 **Dependencies:** none.
 **Boundary:** documents only; no installer change.
-**Promotion trigger:** the owner accepts the direction of ADR 0004.
+**Promotion trigger:** the owner accepts the direction of ADR 0004. Met.
 
 ### 2. Harness directories and `--harness`
 
@@ -51,8 +52,10 @@ and the approval. ADR 0004 is accepted with it.
 manifest, refuses a different value and never overwrites an existing file; `--update` and `--remove`
 cover the harness files like other module files. Built-in modules only.
 **Dependencies:** 1.
-**Boundary:** no declarations and no external stores yet.
-**Promotion trigger:** candidate 1 complete.
+**Boundary:** no declarations and no external stores yet. The plan also carries the specification's
+`write_tree` mode change (every harness write `0644 & ~umask`), the `schema` 2 manifest and the
+`harness_files` record, which every later candidate builds on.
+**Promotion trigger:** candidate 1 complete. Met; waits for the owner to promote it.
 
 ### 3. Pilot: `cad-freecad` and `freecad-scripts`
 
@@ -135,5 +138,6 @@ are updated, and the marker file is written.
 
 ## Related decisions
 
-- [ADR 0004](../decisions/0004-harness-files-in-modules.md) (`Proposed`), ADRs 0001 to 0003, and the
+- [ADR 0004](../decisions/0004-harness-files-in-modules.md) (`Accepted`), the
+  [specification](../specs/module-harness-files.md) (`Approved`), ADRs 0001 to 0003, and the
   [external-modules roadmap](external-modules.md).
