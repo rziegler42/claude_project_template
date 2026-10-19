@@ -473,9 +473,11 @@ hash and the owner running `--remove` bound it, and git history recovers the fil
    including a key that is a valid relative path but not a destination of the recorded harness (for
    example `README.md`, `.claude/settings.json`, `src/main.py`, `.template-manifest`), an unknown or
    unsorted supplier, case-folded duplicate keys, a schema 1 manifest that has `harness` or
-   `harness_files`, more than 4000 entries, a key over 256 characters, a forged key that names a
-   file the module does not ship, a directory-valued key (dropped, `--remove` still succeeds), and a
-   run whose manifest would exceed 1 MiB; an
+   `harness_files`, more than 4000 entries, a key over 256 characters, a directory-valued key
+   (dropped, `--remove` still succeeds), and a run whose manifest would exceed 1 MiB (the writer
+   enforces the record limits too). A forged key that is a valid destination but names a file the
+   module does not ship cannot be told from a real one on load, so it loads; `--remove` deletes it
+   only when the file's hash matches, as the Trust model residual says. An
    installer built from the commit before this work, run with `--update --dry-run` against a schema 2
    manifest, exits 2 and writes nothing.
 7. Collisions: each of the four rules, including a `skills/<name>/` unit with one differing file and
