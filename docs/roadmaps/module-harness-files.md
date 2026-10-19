@@ -115,7 +115,8 @@ changed store is refused until approved again; identical skills install once and
 refused. Security-reviewed adversarially.
 **Dependencies:** 2, 4.
 **Boundary:** no model call and no network access by the installer.
-**Promotion trigger:** candidate 4 complete and the owner asks for store-shipped harness files.
+**Promotion trigger:** candidate 4 complete and the owner asks for store-shipped harness files. Met. Promoted 2026-10-19: the plan is drafted in
+`docs/plans/next.md` and waits for review and the owner's approval.
 
 ### 9. Knowledge-base stores
 
