@@ -65,7 +65,9 @@ configuration drops it. It needs no helper, so it proves the mechanism alone. Sp
 repositories as two plans.
 **Dependencies:** 2.
 **Boundary:** one module and one skill.
-**Promotion trigger:** candidate 2 complete. Met.
+**Promotion trigger:** candidate 2 complete. Met. Promoted 2026-10-19: the template side is
+drafted in `docs/plans/next.md`; the global-configuration side is a separate plan in
+`claude_global_config`.
 
 ### 4. Declarations and reporting
 
