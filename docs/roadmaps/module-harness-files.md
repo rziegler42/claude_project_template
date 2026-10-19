@@ -85,7 +85,9 @@ declares anything yet.
 generic core and no longer refreshes after a commit.
 **Dependencies:** 4.
 **Boundary:** two repositories; no hook and no automatic refresh.
-**Promotion trigger:** candidate 4 complete.
+**Promotion trigger:** candidate 4 complete. Met. Promoted 2026-10-19: the template side is
+drafted in `docs/plans/next.md`; the global-configuration side is a separate plan in
+`claude_global_config`.
 
 ### 6. `plan-review`, `codex` and the `claude` module
 
