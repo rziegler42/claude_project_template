@@ -254,7 +254,7 @@ the trust model, mitigations, and accepted residuals. In practice:
 | `codex` | Codex plan review through the `ask-codex` helper and `second-opinion` skill: request, limits, owner-only commands, state, and mapping to the plan's receipt; requires `plan-review` (harness) |
 | `formal` | Tool-neutral formal verification guidance |
 | `cad` | Tool-neutral CAD workflow (`docs/cad.md`) |
-| `cad-freecad` | FreeCAD conventions; requires `cad` |
+| `cad-freecad` | FreeCAD conventions; requires `cad`; with `--harness claude`, also the `freecad-scripts` skill |
 
 ## Module info
 
@@ -312,10 +312,10 @@ location chosen at install time is an external module's `store`.
 3. Put whole files under `files/` and fragments under `slots/`. A fragment for
    a slot with no marker anywhere is an error.
 4. Keep committed content neutral: name capabilities and policy, never a
-   private helper or skill. Only modules marked `"harness": true` may be
-   harness-specific or name a Claude-owned helper or skill; a module bound to
-   one tool, such as `codex`, is marked this way and requires the neutral
-   module that holds the policy.
+   private helper or skill. Harness-specific content goes in
+   `harness/<harness>/`; a module whose whole purpose is bound to one tool,
+   such as `codex`, may still be marked `"harness": true` (the flag is retired
+   later) and requires the neutral module that holds the policy.
 5. Skills, agents and commands that serve the module go under
    `harness/<harness>/`, not in `files/` (see [Harness files](#harness-files)).
 6. Run the tests; add a case if the module introduces new behavior.
@@ -379,7 +379,9 @@ modules/<name>/harness/claude/
   projects keep `schema` 1 and are unchanged. An installer from before this feature
   refuses a `schema` 2 manifest (it fails closed with a "malformed" error and writes
   nothing), so update the template checkout before running it on such a project.
-- No module ships harness files yet, and helper and worker declarations, external
+- `cad-freecad` is the first module to ship harness files: with `--harness claude` it
+  installs the `freecad-scripts` skill (a `SKILL.md`, ten references and a mesh script)
+  into `.claude/skills/freecad-scripts/`. Helper and worker declarations, external
   stores and their approval are not implemented. The decision is
   [ADR 0004](docs/decisions/0004-harness-files-in-modules.md) and the rules are in
   [the specification](docs/specs/module-harness-files.md).

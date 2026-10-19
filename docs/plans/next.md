@@ -1,6 +1,6 @@
 # Pilot: freecad-scripts skill in cad-freecad
 
-Status: Approved
+Status: In Progress
 Created: 2026-10-19
 
 ## Goal
@@ -158,5 +158,40 @@ Completion: the Result lists the evidence and the follow-up for `claude_global_c
 
 ## Result
 
-<!-- Complete this only after verification. Archive the plan according to
-docs/plans/README.md, then reset this file to the empty template. -->
+Increments A to D are done and verified; the plan commit is `02dc09f` and the work is uncommitted.
+The suite passes with 425 tests (412 before, 13 new in `HarnessPilotTest`, `ModuleHygieneTest` and
+`InstallerTest`).
+
+- Increment A: the skill is in `modules/cad-freecad/harness/claude/skills/freecad-scripts/` (12 files,
+  about 140 KB), copied from `claude_global_config/skills/freecad-scripts` at its commit `b388ec5`
+  (identical to `~/.claude/skills/freecad-scripts` when copied). Four lines were rewritten from
+  `~/.claude/skills/freecad-scripts/...` to `.claude/skills/freecad-scripts/...` (`SKILL.md` line 770 and
+  `references/mesh-reverse-engineering.md` lines 10, 15 and 96); a diff against the source shows
+  only those lines. `mesh_report.py` is stored without the executable bit. The four tests failed
+  before the copy.
+- Increment B: tests with the real module and `base/` for `--new`, `--add`, `--update` (no-op on an
+  unedited tree, a reported conflict on an edit) and `--remove` (unedited files and emptied directories
+  deleted, an edited reference kept), a generic test that every built-in harness tree reads clean, and
+  a neutrality test for a project of every non-harness module installed with `--harness claude`. These
+  were written after the copy, so they are coverage tests; with the harness directory removed from a
+  scratch copy, they fail (4 failures and 5 errors). The neutrality helper now also skips
+  `.template-manifest`, which records the installed harness paths by design.
+- Increment C: `cad-freecad` has a one-line `hint`; the README Modules row, the "Harness files"
+  section and "Writing a module" step 4 are updated (the `"harness": true` flag stays documented until
+  candidate 6).
+- Increment D: a scratch install with `--with cad-freecad --harness claude` produced the 12 files, a
+  `schema` 2 manifest and mode 0644 for the script; only `SKILL.md` and
+  `references/mesh-reverse-engineering.md` differ from the source; `--update --dry-run` reported
+  nothing to update; `--remove cad-freecad` removed the tree and `.claude`. `git diff --check` is clean.
+
+Choices where the plan was silent: the hint prints on every install of the module, including one that
+already passes `--harness claude`, as other hints do; the shipped skill keeps its content except for
+the four paths.
+
+Security review: skipped, as planned (no code changes; owner-authored text; installer paths reviewed
+under plan 0018).
+
+For the owner, in `claude_global_config` (not touched): remove `skills/freecad-scripts` and its
+`config-manifest.txt` entry, update the tests and sync that name it, and reword the mention in its
+plan 0003. Until then both copies exist and the project copy takes precedence in projects that install
+it. The follow-on candidates are 4 (declarations) and 7 (`formal`), both unblocked.

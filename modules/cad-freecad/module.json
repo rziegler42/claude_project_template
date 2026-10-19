@@ -1,5 +1,8 @@
 {
   "description": "FreeCAD 1.1 conventions for the CAD workflow: VarSet, .FCStd storage, backups, headless checks",
-  "requires": ["cad"],
-  "order": 31
+  "requires": [
+    "cad"
+  ],
+  "order": 31,
+  "hint": "pass --harness claude to a new project (or --add --harness claude) to install the freecad-scripts skill under .claude/skills"
 }

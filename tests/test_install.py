@@ -89,7 +89,9 @@ def neutrality_problems(root):
     """(path, name) pairs where tool-specific names appear outside installed harness files."""
     with open(os.path.join(root, ".template-manifest"), encoding="utf-8") as handle:
         recorded = set(json.load(handle).get("harness_files", {}))
-    return [(path, needle) for path, text in read_tree(root).items() if path not in recorded
+    # The manifest lists the installed harness paths, so it is a record, not guidance.
+    return [(path, needle) for path, text in read_tree(root).items()
+            if path not in recorded and path != ".template-manifest"
             for needle in HARNESS_NAMES if needle in text]
 
 
@@ -235,6 +237,15 @@ class InstallerTest(unittest.TestCase):
         non_harness = [n for n, m in modules.items() if not m["harness"]]
         self.new(",".join(non_harness))
         self.assertEqual(neutrality_problems(self.target()), [])
+
+    def test_neutrality_with_a_harness_ignores_only_installed_harness_files(self):
+        modules = install.load_modules()
+        non_harness = [n for n, m in modules.items() if not m["harness"]]
+        code, out, err = self.new(",".join(non_harness), extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(neutrality_problems(self.target()), [])
+        self.assertIn(".claude/skills/freecad-scripts/SKILL.md",
+                      json.loads(read_tree(self.target())[".template-manifest"])["harness_files"])
 
     def test_placeholder_name_substituted(self):
         self.new(name="my-project")
@@ -4798,6 +4809,121 @@ class HarnessSecondPassTest(HarnessCase):
         self.assertTrue(os.path.exists(self.path(".claude/agents/a.md")))
 
 
+class HarnessPilotTest(ProjectCase):
+    """Plan 0019: the real cad-freecad module ships the freecad-scripts skill."""
+
+    SKILL = ".claude/skills/freecad-scripts"
+    REFERENCES = ["assembly-and-3mf", "curves-and-curved-shapes", "geometry-and-shapes",
+                  "gui-and-interface", "images-to-cad", "mesh-reverse-engineering",
+                  "parametric-objects", "partdesign-and-parameters", "scripting-fundamentals",
+                  "workbenches-and-advanced"]
+
+    def files_expected(self):
+        return sorted([self.SKILL + "/SKILL.md", self.SKILL + "/scripts/mesh_report.py"]
+                      + [self.SKILL + "/references/%s.md" % name for name in self.REFERENCES])
+
+    def tree(self):
+        return install.read_harness_tree(install.load_modules()["cad-freecad"], "claude")
+
+    def test_the_module_ships_exactly_the_skill(self):
+        files, units = self.tree()
+        self.assertEqual(sorted(files), self.files_expected())
+        self.assertEqual(units, {self.SKILL: "freecad-scripts"})
+
+    def test_no_file_points_at_the_global_install(self):
+        files, _ = self.tree()
+        for path, data in files.items():
+            self.assertNotIn(b"~/.claude", data, path)
+        skill = files[self.SKILL + "/SKILL.md"].decode("utf-8")
+        self.assertIn(self.SKILL + "/scripts/mesh_report.py", skill)
+        mesh = files[self.SKILL + "/references/mesh-reverse-engineering.md"].decode("utf-8")
+        self.assertIn(self.SKILL + "/scripts", mesh)
+
+    def test_the_skill_is_well_inside_the_limits(self):
+        files, _ = self.tree()
+        self.assertLess(sum(len(d) for d in files.values()), install.HARNESS_MAX_TREE_BYTES // 4)
+        self.assertLess(max(len(d) for d in files.values()), install.HARNESS_MAX_FILE_BYTES // 4)
+
+    def new_pilot(self, with_, *extra):
+        return run([self.target(), "--with", with_, "--git-name", "Test User",
+                    "--git-email", "tester@users.noreply.example.invalid", *extra])
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def test_new_with_the_harness_installs_and_records_the_skill(self):
+        code, out, err = self.new_pilot("cad-freecad", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        for rel in self.files_expected():
+            self.assertTrue(os.path.isfile(self.path(rel)), rel)
+        manifest = self.manifest()
+        self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
+        self.assertEqual(sorted(manifest["harness_files"]), self.files_expected())
+        for entry in manifest["harness_files"].values():
+            self.assertEqual(entry["modules"], ["cad-freecad"])
+        self.assertEqual(os.stat(self.path(self.SKILL + "/scripts/mesh_report.py")).st_mode & 0o111, 0)
+        self.assertNotIn("Unresolved placeholders:\n  .claude", out)
+
+    def test_the_hint_points_at_the_option(self):
+        code, out, err = self.new_pilot("cad-freecad")
+        self.assertEqual(code, 0, err)
+        self.assertIn("cad-freecad: pass --harness claude", out)
+        shutil.rmtree(self.target())
+        self.assertEqual(self.new_pilot("cad")[0], 0)
+        code, out, err = run(["--add", "cad-freecad", "--dir", self.target(), "--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("cad-freecad: pass --harness claude", out)
+
+    def test_new_without_the_harness_installs_nothing_extra(self):
+        self.assertEqual(self.new_pilot("cad-freecad")[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        manifest = self.manifest()
+        self.assertEqual(manifest["schema"], 1)
+        self.assertNotIn("harness_files", manifest)
+
+    def test_add_with_the_harness_installs_the_skill_for_an_installed_module(self):
+        self.assertEqual(self.new_pilot("cad-freecad")[0], 0)
+        code, out, err = run(["--add", "graphify", "--harness", "claude", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), self.files_expected())
+
+    def test_update_leaves_an_unedited_tree_alone_and_keeps_an_edit(self):
+        self.assertEqual(self.new_pilot("cad-freecad", "--harness", "claude")[0], 0)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("conflict", out)
+        reference = self.SKILL + "/references/images-to-cad.md"
+        self.write(reference, "my notes\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict " + reference, out)
+        self.assertEqual(self.read(reference), "my notes\n")
+
+    def test_remove_deletes_the_unedited_skill_and_the_emptied_directories(self):
+        self.assertEqual(self.new_pilot("cad-freecad", "--harness", "claude")[0], 0)
+        kept = self.SKILL + "/references/images-to-cad.md"
+        self.write(kept, "my notes\n")
+        code, out, err = run(["--remove", "cad-freecad", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(os.listdir(self.path(self.SKILL)), ["references"])
+        self.assertEqual(os.listdir(self.path(self.SKILL + "/references")), ["images-to-cad.md"])
+        self.assertEqual(self.manifest()["harness_files"], {})
+        self.write(kept, "")
+        os.unlink(self.path(kept))
+        self.assertEqual(self.new_pilot("cad-freecad", "--harness", "claude")[0], 2)  # target exists
+
+    def test_remove_with_no_edits_leaves_no_skill_directory(self):
+        self.assertEqual(self.new_pilot("cad-freecad", "--harness", "claude")[0], 0)
+        self.assertEqual(run(["--remove", "cad-freecad", "--dir", self.target()])[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+
+    def test_the_script_is_not_stored_executable(self):
+        meta = install.load_modules()["cad-freecad"]
+        script = os.path.join(meta["path"], "harness", "claude", "skills", "freecad-scripts",
+                              "scripts", "mesh_report.py")
+        self.assertFalse(os.stat(script).st_mode & 0o111)
+
+
 class HarnessNewProjectTest(HarnessCase):
     """Plan 0018 increment C: --harness with a new project."""
 
@@ -4970,6 +5096,13 @@ class HarnessNewProjectTest(HarnessCase):
 
 
 class ModuleHygieneTest(unittest.TestCase):
+    def test_every_built_in_harness_tree_reads_clean(self):
+        for name, meta in install.load_modules().items():
+            for harness in install.HARNESSES:
+                with self.subTest(module=name, harness=harness):
+                    install.read_harness_tree(meta, harness)
+
+
     def test_every_fragment_has_a_marker_in_some_file(self):
         modules = install.load_modules()
         names = install.resolve(list(modules), modules)
