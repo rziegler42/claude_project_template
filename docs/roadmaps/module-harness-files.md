@@ -78,16 +78,15 @@ The marker file is read as untrusted data. The global configuration writes the m
 **Promotion trigger:** candidate 3 shows the layout works. Met. Done in plan 0020; no real module
 declares anything yet.
 
-### 5. Graphify split and the `graphify` module
+### 5. Graphify split and the `graphify` module (template side done 2026-10-19, plan 0022)
 
 **Outcome:** the Graphify commands move into a script the `graphify` module ships, with
 `graphify-workflow` and `graphify-semantic` in its harness directory; `claude-workflow` keeps its
 generic core and no longer refreshes after a commit.
 **Dependencies:** 4.
 **Boundary:** two repositories; no hook and no automatic refresh.
-**Promotion trigger:** candidate 4 complete. Met. Promoted 2026-10-19: the template side is
-drafted in `docs/plans/next.md`; the global-configuration side is a separate plan in
-`claude_global_config`.
+**Promotion trigger:** candidate 4 complete. Met. The template side is done (plan 0022); removing
+the Graphify commands, skill and agent from `claude_global_config` is separate work there.
 
 ### 6. `plan-review`, `codex` and the `claude` module
 
