@@ -75,7 +75,8 @@ installer reports each as present or missing at install, `--add` and `--update`,
 The marker file is read as untrusted data. The global configuration writes the marker.
 **Dependencies:** 2.
 **Boundary:** reporting only; no module is converted yet.
-**Promotion trigger:** candidate 3 shows the layout works.
+**Promotion trigger:** candidate 3 shows the layout works. Met. Promoted 2026-10-19: the plan is
+drafted in `docs/plans/next.md` and waits for the owner's approval.
 
 ### 5. Graphify split and the `graphify` module
 
