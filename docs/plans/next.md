@@ -1,6 +1,6 @@
 # Graphify tooling in the graphify module
 
-Status: Approved
+Status: In Progress
 Created: 2026-10-19
 
 ## Goal
@@ -239,5 +239,81 @@ Completion: the findings are decided and the suite is green.
 
 ## Result
 
-<!-- Complete this only after verification. Archive the plan according to
-docs/plans/README.md, then reset this file to the empty template. -->
+Increments A to G are implemented and verified; the plan commit is `03ba2ef` and the work is
+uncommitted. The suite passes with 610 tests (482 before this plan). `tests/test_graphify_tool.py` is new
+(ported from the skill's `test_workflow.py` and `test_scripts_review.py` and the graph cases of the global
+helper tests, plus new ones); `tests/test_install.py` gained `GraphifyToolInstallTest` and
+`GraphifyHarnessTest`.
+
+Source: the graph commands of `claude_global_config/bin/claude-workflow` and
+`skills/graphify-workflow/scripts/` (`prepare.py`, `finalize.py`, `ignored_paths.py`, the extraction spec),
+read at the working tree of 2026-10-19; `post_commit.py` was not ported. Delivered: `tools/graphify/`
+(`workflow.py`, the three helper scripts, `extraction-spec.md`, `refresh.md`), the `graphify-workflow`
+skill with its `references/refresh.md`, the `graphify-semantic` agent unchanged, `harness.json`, the
+`helpers`/`workers`/`global_config` declarations, a new hint, and the README sections.
+
+Rulings (deviations from the plan text, made while implementing):
+- The entry script is `workflow.py`, not `graphify.py`. A `graphify.py` beside `prepare.py` shadows the
+  vendor `graphify` package the helper scripts import (found when the ported tests failed). Commands are
+  `status`, `doctor`, `prepare`, `abort`, `finalize`, `refresh-code`, `validate-chunk`, `query`, `path`,
+  `explain`, `affected`, `god-nodes`, `diagnose`, `benchmark`, each with `--root`.
+- `refresh-code` is new. Without post-commit, `doctor` had no action to offer for a `stale_code` graph. It
+  runs the vendor's code-only update and records it (the old `record_code_refresh` semantic-baseline pinning),
+  without the commit marker or retry logic, and is never run by a commit.
+- State files are `.workflow_*`; a graph with the old `.claude_*` files reads as `present` once.
+- The agent file is unchanged, including its hook from the global configuration. Checked against the Claude
+  Code documentation: exit code 2 blocks a PreToolUse call and Python exits 2 for a missing script (an
+  inference the docs do not state; `onFailure: "block"` would make it explicit), a project agent's
+  frontmatter hooks run only after the workspace trust dialog and are skipped in untrusted folders and `-p`
+  sessions, and a project agent overrides a same-named user agent. The skill and `refresh.md` therefore
+  tell the model to dispatch the agent only in a trusted workspace.
+- The tool refuses to run when the repository's own git config defines programs git may run (names, never
+  values), unless `--allow-repo-programs`, as the owner's global commit helper does for commits; git is also
+  run with `core.fsmonitor`, `core.hooksPath`, the pager and the untracked cache overridden and inherited
+  `GIT_*` variables scrubbed. Repositories that legitimately use filter drivers (for example LFS) need the flag.
+
+Verification: `python3 -I -m unittest discover -s tests` passes with 610 tests; `git diff --check` is clean.
+Mutation checks on scratch copies (trusting a `PATH` directory in the repository, following a symlinked
+output directory, unchecked chunk paths, a second `prepare`, `abort` discarding chunks, blessing an unknown
+graph, `refresh-code` during a refresh, an open manifest schema, an optional contract, repository programs
+allowed, an inherited runtime variable, a runtime inside the project, unlisted chunk files, no cumulative hash
+budget, sources under `.git` or `graphify-out`, invisible marks passing, an in-project symlinked chunk, no
+output cap, a size cap, a runtime beside a trusted `graphify` that links into the repository, a grandchild
+holding the pipes) each fail the new tests. One mutation, removing the regular-file check in `read_json`,
+survives and is an equivalent mutant (the non-blocking open already fails safely on special files); the check
+stays as defense in depth. On seven graph states `status` and `doctor` give the same status as the global
+helper. The end-to-end refresh tests ran against the real `graphify` executable on this machine.
+
+Adversarial review (`security-reviewer`, scratch copies; no Critical or High finding), two passes:
+- Pass 1: Medium: a committed manifest was trusted (source paths, contract, hashing without a cap; the
+  refresh procedure passes them to a worker that can read files); a repository `core.fsmonitor` ran code
+  (inherited from the global helper). Low: FIFOs hung the readers; deeply nested JSON wedged the workflow;
+  the helper scripts re-executed a `python` found without a containment check; option-like text reached the
+  vendor; control characters passed through; no timeout kill of a grandchild; `doctor` and `validate-chunk`
+  ignored a symlinked output directory. All fixed with tests that failed first.
+- Pass 2 (of the fixes): Medium: a clean filter driver still ran during `git status`; an inherited
+  `GRAPHIFY_TOOL_PYTHON` was executed. Low: a manifest without a contract and with free-text fields was
+  accepted; no cumulative hash cap; invisible and bidirectional marks passed; unbounded vendor runs and
+  output; `abort` ignored chunk files the manifest did not list; an in-project symlinked chunk was read. All
+  fixed with tests that failed first (a strict manifest schema with a required contract, a refusal on
+  repository programs, scrubbed `GRAPHIFY_TOOL_*`, a runtime that must lie outside the project, a 1 GiB total
+  hash budget, a query timeout and a 1 MiB output cap).
+- Not reviewed again: the pass 2 fixes were verified by tests and mutation checks, not a third review.
+- Accepted residuals: a hostile clone carries its own tool, skill and agent text, and nothing in the
+  repository can detect that (the guards are the README and skill warnings and `install.py --update`
+  reporting an edit as kept, which cannot see a fresh clone); `prepare` and `finalize` are not time-bounded
+  because builds are long; the vendor's own behaviour (option parsing, writes through symlinks inside
+  `graphify-out`) is outside the tool; `safe.directory`, credential-helper and alias routes were reasoned
+  about, not executed.
+- Not exercised: the real Claude Code hook and trust behaviour for the agent, a case-insensitive alias of a
+  path that does not exist, and a real concurrent swap between a check and a read.
+
+For the owner, in `claude_global_config` (not touched): remove the `graph-*` commands and `graph-post-commit`
+from `bin/claude-workflow` and the commit helper's Graphify result; remove `skills/graphify-workflow` and
+`agents/graphify-semantic.md`, their `config-manifest.txt` lines and the tests that name them; keep
+`hooks/review_agent_guard.py` and its tests (the shipped agent calls it); reword the global `CLAUDE.md`
+Graphify section (no automatic refresh; the project's tool and skill); and, if you want the new command
+shape allowed, add `python3 tools/graphify/workflow.py` entries to `settings-policy.txt`. Until then both
+copies exist, and a project that installs the module uses its own.
+
+Not done (deferred above): the other roadmap candidates (6, 8, 9, 10).

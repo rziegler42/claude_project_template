@@ -1,6 +1,13 @@
 {
-  "description": "Graphify discovery and impact-analysis policy, .graphifyignore, graph output ignore, plan evidence section",
+  "description": "Graphify discovery and impact-analysis policy, the tools/graphify workflow tool, .graphifyignore, graph output ignore, plan evidence section",
   "requires": [],
   "order": 10,
-  "hint": "no graph exists yet; run `claude-workflow graph-doctor` when discovery or impact analysis is needed"
+  "hint": "no graph exists yet; run `python3 tools/graphify/workflow.py doctor` when discovery or impact analysis is needed (the graphify executable must be on PATH)",
+  "helpers": [
+    "graphify"
+  ],
+  "workers": {
+    "graphify-chunk-extractor": "reads the assigned source files completely and writes one chunk file at the assigned path"
+  },
+  "global_config": true
 }

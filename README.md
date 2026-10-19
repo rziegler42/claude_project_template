@@ -251,7 +251,7 @@ the trust model, mitigations, and accepted residuals. In practice:
 | Module | Purpose |
 |---|---|
 | `claude` | Claude Code entry point (`CLAUDE.md` importing `AGENTS.md`), local-settings ignore line, and a `.claude/remote-runner.toml` stub with the project id and no active profile (harness) |
-| `graphify` | Graphify discovery/impact policy, `.graphifyignore`, plan evidence section |
+| `graphify` | Graphify discovery/impact policy, `.graphifyignore`, plan evidence section, and the `tools/graphify` workflow tool; with `--harness claude`, also the `graphify-workflow` skill and the `graphify-semantic` agent |
 | `plan-review` | Tool-neutral policy for an independent, bounded, read-only review of the plan, and a Second opinion receipt in the plan and its archive |
 | `codex` | Codex plan review through the `ask-codex` helper and `second-opinion` skill: request, limits, owner-only commands, state, and mapping to the plan's receipt; requires `plan-review` (harness) |
 | `formal` | Tool-neutral formal verification guidance; with `--harness claude`, also the `verilog-sby-formal` skill |
@@ -381,15 +381,54 @@ modules/<name>/harness/claude/
   projects keep `schema` 1 and are unchanged. An installer from before this feature
   refuses a `schema` 2 manifest (it fails closed with a "malformed" error and writes
   nothing), so update the template checkout before running it on such a project.
-- Two modules ship harness files so far. With `--harness claude`, `cad-freecad` installs
+- Three modules ship harness files so far. With `--harness claude`, `cad-freecad` installs
   the `freecad-scripts` skill (a `SKILL.md`, ten references and a mesh script) into
-  `.claude/skills/freecad-scripts/`, and `formal` installs the `verilog-sby-formal` skill
-  (`SKILL.md` and `reference.md`) into `.claude/skills/verilog-sby-formal/`. For a project that
-  already has one of them, `install.py --add <module> --harness claude --dir <project>`
-  records the harness and installs the files. External stores and their approval are not
+  `.claude/skills/freecad-scripts/`, `formal` installs the `verilog-sby-formal` skill
+  (`SKILL.md` and `reference.md`) into `.claude/skills/verilog-sby-formal/`, and `graphify`
+  installs the `graphify-workflow` skill and the `graphify-semantic` agent (see
+  [Graphify tooling](#graphify-tooling)). For a project that already has one of them,
+  `install.py --add <module> --harness claude --dir <project>` records the harness and
+  installs the files. External stores and their approval are not
   implemented. The decision is
   [ADR 0004](docs/decisions/0004-harness-files-in-modules.md) and the rules are in
   [the specification](docs/specs/module-harness-files.md).
+
+## Graphify tooling
+
+The `graphify` module ships a stdlib-only workflow tool in the project, run with `python3`
+(installed files do not keep an executable bit):
+
+```sh
+python3 tools/graphify/workflow.py status            # graph freshness
+python3 tools/graphify/workflow.py doctor            # workflow state and one safe next action
+python3 tools/graphify/workflow.py query "..."       # also path, explain, affected, god-nodes, diagnose, benchmark
+python3 tools/graphify/workflow.py refresh-code      # explicit code-only update
+python3 tools/graphify/workflow.py prepare           # semantic refresh: prepare, extract, validate-chunk, finalize
+```
+
+Every command takes `--root DIR` (default: the current directory) and prints one JSON line. The
+queries go through the `graphify` executable on a trusted `PATH` (an absolute directory outside the
+repository), which the tool never replaces or installs, and the refresh scripts and the chunk
+contract live beside it in `tools/graphify/` (`refresh.md` is the neutral procedure).
+
+- **Nothing refreshes the graph on its own.** There is no git hook and nothing runs after a commit.
+  `doctor` reports `stale_code` or `stale_semantic` and the one safe next action; `refresh-code` is
+  the explicit code-only update, and changed documents need the `prepare` and `finalize` procedure.
+- **State** lives under the ignored `graphify-out/`, in `.workflow_*` files. A graph built by the
+  older global helper has `.claude_*` state files, which are ignored: it reads as `present` (stale)
+  once and a refresh rebuilds it.
+- **It is project code.** A cloned project could carry a modified copy, so run it only in a project you
+  have reviewed; `install.py --update` reports an edited copy as kept but cannot detect one in a fresh
+  clone. The tool runs git with the repository's own `core.fsmonitor`, hooks path and similar settings
+  overridden, scrubs inherited `GIT_*` variables, and refuses to run when the repository's git config
+  defines programs git may run (filter drivers, `core.sshCommand`, includes and the like; it names the
+  settings, never their values) unless you pass `--allow-repo-programs` after reviewing them.
+- With `--harness claude` the module also installs the `graphify-workflow` skill and the
+  `graphify-semantic` agent, and declares the `graphify` helper, the `graphify-chunk-extractor`
+  worker role and a dependency on the harness's global configuration (the agent's write guard is a
+  hook from there). Claude Code runs a project agent's frontmatter hooks only after the workspace
+  trust dialog is accepted, so a semantic refresh needs a trusted workspace. For an existing
+  project, `install.py --add graphify --harness claude --dir <project>` installs them.
 
 ## Declared dependencies
 
@@ -426,7 +465,7 @@ unchanged):
 The lines appear under "Declared dependencies" for the modules in the run: the new
 modules for `--new` and `--add` (every installed built-in module when `--add --harness`
 activates a harness), and the updated modules for `--update`. An `--add` that finds
-everything installed prints "Nothing to add" and no lines. No module declares anything yet.
+everything installed prints "Nothing to add" and no lines. The `graphify` module declares all three.
 
 ## Boundaries
 

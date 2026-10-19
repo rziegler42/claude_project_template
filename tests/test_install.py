@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import select
 import shutil
 import subprocess
@@ -434,7 +435,7 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("Next steps:", out)
         self.assertIn("graphify: ", out)
-        self.assertIn("graph-doctor", out)
+        self.assertIn("tools/graphify/workflow.py doctor", out)
 
     def test_no_hint_when_no_selected_module_has_one(self):
         code, out, err = self.new("cad")
@@ -443,14 +444,14 @@ class InstallerTest(unittest.TestCase):
     def test_hint_printed_by_add_only_for_new_modules(self):
         self.new("")
         code, out, err = run(["--add", "graphify", "--dir", self.target()])
-        self.assertIn("graph-doctor", out)
+        self.assertIn("tools/graphify/workflow.py doctor", out)
         code, out, err = run(["--add", "graphify", "--dir", self.target()])
-        self.assertNotIn("graph-doctor", out)
+        self.assertNotIn("tools/graphify/workflow.py doctor", out)
 
     def test_hint_labelled_in_dry_run(self):
         code, out, err = self.new("graphify", extra=["--dry-run"])
         self.assertIn("Next steps (dry run, nothing written):", out)
-        self.assertIn("graph-doctor", out)
+        self.assertIn("tools/graphify/workflow.py doctor", out)
         self.assertFalse(os.path.exists(self.target()))
 
     def test_required_module_hint_is_printed_once(self):
@@ -5168,7 +5169,7 @@ class HarnessPilotTest(ProjectCase):
 
     def test_add_with_the_harness_installs_the_skill_for_an_installed_module(self):
         self.assertEqual(self.new_pilot("cad-freecad")[0], 0)
-        code, out, err = run(["--add", "graphify", "--harness", "claude", "--dir", self.target()])
+        code, out, err = run(["--add", "plan-review", "--harness", "claude", "--dir", self.target()])
         self.assertEqual(code, 0, err)
         self.assertEqual(sorted(self.manifest()["harness_files"]), self.files_expected())
 
@@ -5427,6 +5428,192 @@ class DeclarationReportTest(HarnessCase):
         self.update("--global-config", self.cfg)
         run(["--add", "dep", "--dir", self.target()])
         self.assertFalse(os.path.exists(self.sentinel))
+
+
+class GraphifyToolInstallTest(ProjectCase):
+    """Plan 0022 increment D: the graphify module ships the workflow tool."""
+
+    TOOL = "tools/graphify"
+    NAMES = ("extraction-spec.md", "finalize.py", "ignored_paths.py", "prepare.py", "refresh.md",
+             "workflow.py")
+
+    @property
+    def FILES(self):
+        return sorted(self.TOOL + "/" + name for name in self.NAMES)
+
+    def new_graphify(self, *extra):
+        return run([self.target(), "--with", "graphify", "--git-name", "Test User",
+                    "--git-email", "tester@users.noreply.example.invalid", *extra])
+
+    def test_with_graphify_installs_the_tool_and_nothing_harness_specific(self):
+        code, out, err = self.new_graphify()
+        self.assertEqual(code, 0, err)
+        for rel in self.FILES:
+            self.assertTrue(os.path.isfile(self.path(rel)), rel)
+        self.assertEqual(sorted(os.listdir(self.path(self.TOOL))), sorted(os.path.basename(f) for f in self.FILES))
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertEqual(json.loads(self.read(".template-manifest"))["schema"], 1)
+
+    def test_installed_tool_files_are_not_executable(self):
+        self.assertEqual(self.new_graphify()[0], 0)
+        for rel in self.FILES:
+            self.assertEqual(os.stat(self.path(rel)).st_mode & 0o111, 0, rel)
+
+    def test_the_installed_files_are_neutral_text(self):
+        self.assertEqual(self.new_graphify()[0], 0)
+        for rel in self.FILES:
+            text = self.read(rel)
+            for needle in HARNESS_NAMES:
+                self.assertNotIn(needle, text, "%s mentions %s" % (rel, needle))
+
+    def test_the_installed_tool_runs_in_the_new_project(self):
+        self.assertEqual(self.new_graphify()[0], 0)
+        result = subprocess.run([sys.executable, "-B", self.path(self.TOOL + "/workflow.py"), "status"],
+                                cwd=self.target(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout.strip().splitlines()[-1])["status"], "missing")
+        result = subprocess.run([sys.executable, "-B", self.path(self.TOOL + "/workflow.py"), "post-commit"],
+                                cwd=self.target(), capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_update_keeps_an_edited_script_and_reports_it(self):
+        self.assertEqual(self.new_graphify()[0], 0)
+        edited = self.TOOL + "/workflow.py"
+        self.write(edited, "# my change\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn(edited, out)
+        self.assertEqual(self.read(edited), "# my change\n")
+
+    def test_the_hint_names_the_tool(self):
+        out = self.new_graphify()[1]
+        self.assertIn("graphify: ", out)
+        self.assertIn("python3 tools/graphify/workflow.py doctor", out)
+
+    def test_remove_deletes_the_unedited_tool(self):
+        self.assertEqual(self.new_graphify()[0], 0)
+        self.write(self.TOOL + "/refresh.md", "mine\n")
+        code, out, err = run(["--remove", "graphify", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(os.listdir(self.path(self.TOOL)), ["refresh.md"])
+
+
+class GraphifyHarnessTest(ProjectCase):
+    """Plan 0022 increment E: the graphify module's harness files and declarations."""
+
+    SKILL = ".claude/skills/graphify-workflow"
+    AGENT = ".claude/agents/graphify-semantic.md"
+    ROLE = "graphify-chunk-extractor"
+
+    def files_expected(self):
+        return sorted([self.SKILL + "/SKILL.md", self.SKILL + "/references/refresh.md", self.AGENT])
+
+    def tree(self):
+        return install.read_harness_tree(install.load_modules()["graphify"], "claude")
+
+    def setUp(self):
+        super().setUp()
+        self.bin = os.path.join(self.work, "bin")
+        os.makedirs(self.bin)
+        self.cfg = os.path.join(self.work, "cfg")
+        os.makedirs(self.cfg)
+        with open(os.path.join(self.cfg, "global-config.json"), "w") as handle:
+            handle.write('{"schema": 1}')
+        tool = os.path.join(self.bin, "graphify")
+        with open(tool, "w") as handle:
+            handle.write("#!/bin/sh\nexit 0\n")
+        os.chmod(tool, 0o755)
+        os.environ["PATH"] = self.bin + os.pathsep + os.environ.get("PATH", "")  # restored by the case
+
+    def new_graphify(self, *extra):
+        return run([self.target(), "--with", "graphify", "--global-config", self.cfg, "--git-name", "T",
+                    "--git-email", "t@users.noreply.example.invalid", *extra])
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def test_the_module_ships_the_skill_the_reference_and_the_agent(self):
+        files, units = self.tree()
+        self.assertEqual(sorted(files), self.files_expected())
+        self.assertEqual(units, {self.SKILL: "graphify-workflow", self.AGENT: "graphify-semantic"})
+
+    def test_the_skill_names_the_new_tool_and_no_commit_step(self):
+        files, _ = self.tree()
+        skill = files[self.SKILL + "/SKILL.md"].decode("utf-8")
+        reference = files[self.SKILL + "/references/refresh.md"].decode("utf-8")
+        for text in (skill, reference):
+            self.assertIn("python3 tools/graphify/workflow.py", text)
+            self.assertNotIn("claude-workflow", text)
+            self.assertNotIn("post-commit", text)
+            self.assertIsNone(re.search(r"graph-(status|doctor|query|path|explain|affected|prepare|abort|finalize|"
+                                        r"validate-chunk|diagnose|god-nodes|benchmark)", text))
+        self.assertIn("refresh-code", skill)
+        self.assertIn("no git hook", skill)
+        self.assertIn("trusted workspace", skill)
+        self.assertIn("workspace is trusted", reference)
+        self.assertIn("--allow-repo-programs", skill)
+        self.assertIn("untrusted", reference)
+
+    def test_the_agent_keeps_its_write_guard_unchanged(self):
+        agent = self.tree()[0][self.AGENT].decode("utf-8")
+        self.assertIn('review_agent_guard.py" chunk', agent)
+        self.assertIn("tools: Read, Write, Edit", agent)
+        self.assertIn("disallowedTools: Bash", agent)
+
+    def test_the_declarations(self):
+        meta = install.load_modules()["graphify"]
+        self.assertEqual(meta["helpers"], ["graphify"])
+        self.assertEqual(list(meta["workers"]), [self.ROLE])
+        self.assertIs(meta["global_config"], True)
+        roles = install.read_harness_roles(meta, "claude")
+        self.assertEqual(roles, {self.ROLE: self.AGENT})
+
+    def test_with_the_harness_it_installs_records_and_reports(self):
+        code, out, err = self.new_graphify("--harness", "claude")
+        self.assertEqual(code, 0, err)
+        for rel in self.files_expected():
+            self.assertTrue(os.path.isfile(self.path(rel)), rel)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), self.files_expected())
+        lines = [line.strip() for line in out.splitlines()]
+        self.assertIn("graphify: helper graphify: present", lines)
+        self.assertIn("graphify: worker %s: implemented by graphify" % self.ROLE, lines)
+        self.assertIn("graphify: global configuration: present", lines)
+
+    def test_the_report_says_when_the_helper_and_marker_are_missing(self):
+        os.unlink(os.path.join(self.bin, "graphify"))
+        os.unlink(os.path.join(self.cfg, "global-config.json"))
+        env = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.bin + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
+        try:
+            code, out, err = self.new_graphify("--harness", "claude")
+        finally:
+            os.environ["PATH"] = env
+        self.assertEqual(code, 0, err)
+        lines = [line.strip() for line in out.splitlines()]
+        self.assertIn("graphify: helper graphify: missing", lines)
+        self.assertIn("graphify: global configuration: missing", lines)
+
+    def test_without_the_harness_only_the_tool_is_installed(self):
+        code, out, err = self.new_graphify()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isfile(self.path("tools/graphify/workflow.py")))
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        lines = [line.strip() for line in out.splitlines()]
+        self.assertIn("graphify: worker %s: no harness selected" % self.ROLE, lines)
+
+    def test_add_with_the_harness_activates_it(self):
+        self.assertEqual(self.new_graphify()[0], 0)
+        code, out, err = run(["--add", "graphify", "--harness", "claude", "--global-config", self.cfg,
+                              "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), self.files_expected())
+
+    def test_remove_deletes_the_unedited_harness_files(self):
+        self.assertEqual(self.new_graphify("--harness", "claude")[0], 0)
+        code, out, err = run(["--remove", "graphify", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertFalse(os.path.exists(self.path("tools/graphify/workflow.py")))
 
 
 class HarnessFormalTest(ProjectCase):

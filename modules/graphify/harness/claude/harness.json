@@ -1,0 +1,5 @@
+{
+  "roles": {
+    "graphify-chunk-extractor": "agents/graphify-semantic.md"
+  }
+}
