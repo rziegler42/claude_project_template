@@ -68,15 +68,15 @@ repositories as two plans.
 **Promotion trigger:** candidate 2 complete. Met. The template side is done (plan 0019); removing
 the global copy is a separate plan in `claude_global_config`, still open.
 
-### 4. Declarations and reporting
+### 4. Declarations and reporting (done 2026-10-19, plan 0020)
 
 **Outcome:** `module.json` accepts `helpers`, `workers` and the global-configuration dependency; the
 installer reports each as present or missing at install, `--add` and `--update`, and installs none.
 The marker file is read as untrusted data. The global configuration writes the marker.
 **Dependencies:** 2.
 **Boundary:** reporting only; no module is converted yet.
-**Promotion trigger:** candidate 3 shows the layout works. Met. Promoted 2026-10-19: the plan is
-drafted in `docs/plans/next.md` and waits for the owner's approval.
+**Promotion trigger:** candidate 3 shows the layout works. Met. Done in plan 0020; no real module
+declares anything yet.
 
 ### 5. Graphify split and the `graphify` module
 
