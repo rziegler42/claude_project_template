@@ -105,7 +105,9 @@ def load_modules(modules_dir=None):
             continue
         if not NAME_RE.match(name):
             raise InstallError("invalid module name: %r" % name)
-        meta = {"description": "", "requires": [], "order": 100, "harness": False,
+        if name == BASE_SUPPLIER:
+            raise InstallError("module name %r is reserved for the template's base files" % name)
+        meta = {"description": "", "requires": [], "order": 100,
                 "hint": None, "helpers": [], "workers": {}, "global_config": False}
         meta_path = os.path.join(path, "module.json")
         if os.path.lexists(meta_path):
@@ -113,6 +115,9 @@ def load_modules(modules_dir=None):
                 meta.update(json.loads(read_regular(meta_path, MAX_MANIFEST_BYTES).decode("utf-8")))
             except (ValueError, RecursionError, TypeError):
                 raise InstallError("module %s: module.json is not a valid JSON object" % name)
+        if "harness" in meta:
+            raise InstallError("module %s: the harness flag is retired; ship harness-specific files in "
+                               "harness/<name>/ instead" % name)
         for req in meta["requires"]:
             if not NAME_RE.match(req):
                 raise InstallError("module %s: invalid requirement %r" % (name, req))
@@ -316,7 +321,7 @@ def read_external(name, value, target, builtin):
     """
     if not EXT_NAME_RE.match(name):
         raise InstallError("invalid module name %r" % name)
-    if name in builtin:
+    if name in builtin or name == BASE_SUPPLIER or name in RETIRED_MODULES:
         raise InstallError("%r is a built-in module name and cannot name a store" % name)
     require_printable(value, "module path")
     path = os.path.expanduser(value)
@@ -410,7 +415,7 @@ def read_external(name, value, target, builtin):
     module = {
         "name": name, "path": store, "external": True, "description": meta["description"],
         "hint": meta.get("hint"), "module_format": fmt, "digest": digest, "requires": [],
-        "order": EXTERNAL_ORDER, "harness": False, "slots": slots,
+        "order": EXTERNAL_ORDER, "slots": slots,
     }
     module.update({k: meta[k] for k in INFO_KEYS if k in meta})
     module["store"] = where
@@ -658,6 +663,7 @@ HARNESSES = {
         "root_files": ("CLAUDE.md",),
         "entries": ("skills", "agents", "commands", "remote-runner.toml"),
         "marker": "global-config.json",
+        "gitignore": ("/.claude/settings.local.json",),
     },
 }
 MARKER_MAX_BYTES = 4096
@@ -837,6 +843,9 @@ def read_harness_tree(module, harness, reserved=frozenset(), budget=None):
                                % (name, shown_text(rel)))
         contents[rel] = data
     if HARNESS_JSON in contents:
+        if name == BASE_SUPPLIER:
+            raise InstallError("base/harness/%s: %s is not allowed (only a module declares roles)"
+                               % (harness, HARNESS_JSON))
         check_harness_json(contents[HARNESS_JSON], contents, name)
     installed = {}
     for rel, data in contents.items():
@@ -888,7 +897,7 @@ class RunBudget:
 
 def reserved_paths(modules, names):
     """Folded installed paths that `base/` and the `files/` of built-in `names` ship."""
-    reserved = {fold(rel) for rel in collect_tree(BASE_DIR)}
+    reserved = {fold(rel) for rel in base_tree()}
     for name in names:
         if name in modules and not modules[name].get("external"):
             reserved |= {fold(rel) for rel in
@@ -917,15 +926,20 @@ def check_module_harness_dirs(names, modules):
             check_harness_dirs(modules[name])
 
 
-def prepare_harness(names, modules, harness, project_name, installed=()):
-    """Read, check and substitute the harness tree of each built-in module in `names`.
+def prepare_harness(names, modules, harness, project_name, installed=(), include_base=False):
+    """Read, check and substitute the harness tree of each built-in module in `names`, and of base/.
 
-    `installed` are the project's other modules; their `files/` are reserved too.
+    `installed` are the project's other modules; their `files/` are reserved too. `include_base`
+    adds the template's own base harness files (supplier `base`).
     """
     builtin = [n for n in names if not modules[n].get("external")]
     reserved = reserved_paths(modules, set(builtin) | set(installed))
     budget = RunBudget()
     trees = {}
+    if include_base:
+        files, units = read_harness_tree(base_harness_module(), harness, reserved, budget)
+        substitute_harness(files, project_name)
+        trees[BASE_SUPPLIER] = (files, units)
     for name in builtin:
         files, units = read_harness_tree(modules[name], harness, reserved, budget)
         substitute_harness(files, project_name)
@@ -1044,6 +1058,44 @@ def plan_harness(trees, harness, existing, record, project=None):
     return plan
 
 
+IGNORE_FILE = ".gitignore"
+
+
+def apply_ignore_block(text, harness):
+    """The `.gitignore` text with the harness's own block added or restored, and a note when it cannot be.
+
+    The block is `# BEGIN harness:<name>` ... `# END harness:<name>` (not a module block). Text outside the
+    markers is never touched; inexact or duplicated markers leave the file alone.
+    """
+    lines = HARNESSES[harness].get("gitignore", ())
+    if not lines:
+        return text, None
+    begin, end = "# BEGIN harness:%s" % harness, "# END harness:%s" % harness
+    block = [begin, *lines, end]
+    rows = text.split("\n")
+    begins = [i for i, row in enumerate(rows) if row == begin]
+    ends = [i for i, row in enumerate(rows) if row == end]
+    marked = any(begin in row or end in row for row in rows)
+    if not begins and not ends and not marked:
+        prefix = text if (not text or text.endswith("\n")) else text + "\n"
+        return prefix + "\n".join(block) + "\n", None
+    if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
+        rows[begins[0]:ends[0] + 1] = block
+        return "\n".join(rows), None
+    return text, "%s has harness:%s markers that are not exact, single lines; left alone" % (IGNORE_FILE, harness)
+
+
+def decode_ignore(data):
+    """The `.gitignore` bytes as text, or None when they are not UTF-8 (the file is then left alone)."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+NOT_TEXT_NOTE = "%s is not UTF-8 text; the harness block was not added or checked" % IGNORE_FILE
+
+
 def read_harness_roles(module, harness):
     """{role: installed path} from the module's harness.json for `harness`, or {}."""
     path = os.path.join(module["path"], "harness", harness, HARNESS_JSON)
@@ -1098,7 +1150,7 @@ def report_safely(*args, **kwargs):
 
 def report_harness(out, plan, harness, trees):
     for module in sorted(trees):
-        if not trees[module][0]:
+        if not trees[module][0] and module != BASE_SUPPLIER:
             out("  %s: no %s files" % (module, harness))
     for path, why in plan.conflicts:
         out("  conflict %s (%s)" % (path, why))
@@ -1178,6 +1230,45 @@ def check_harness_json(data, contents, name):
         if not (isinstance(target, str) and safe_relpath(target) and target in contents
                 and target != HARNESS_JSON):
             raise bad("maps a role to a file that is not in the harness directory")
+
+
+BASE_HARNESS_DIR = "harness"
+BASE_SUPPLIER = "base"
+# Modules that no longer exist: the name means `--harness <value>`. The old fragment is what the retired
+# module wrote into `.gitignore`, compared before its block is replaced by the harness's own block.
+RETIRED_MODULES = {"claude": "claude"}
+RETIRED_ORDERS = {"claude": 5}
+RETIRED_FRAGMENTS = {"claude": {"gitignore": (
+    "# Personal Claude Code settings; shared project configuration may still be\n"
+    "# committed under .claude/ when the project uses it.\n"
+    "/.claude/settings.local.json\n")}}
+
+
+def take_retired(entries, option_harness):
+    """Split retired module names off `entries`: (the rest, the harness they and the option choose, notes)."""
+    kept, harness, notes = [], option_harness, []
+    for name, value in entries:
+        if name in RETIRED_MODULES and value is None:
+            wanted = RETIRED_MODULES[name]
+            if option_harness is not None and option_harness != wanted:
+                raise InstallError("%s is retired as a module and means --harness %s, which conflicts with "
+                                   "--harness %s" % (name, wanted, shown_text(option_harness, 32)))
+            harness = wanted
+            notes.append("%s is retired as a module; --harness %s was used instead" % (name, wanted))
+        else:
+            kept.append((name, value))
+    return kept, harness, notes
+
+
+def base_tree(base_dir=None):
+    """The files of base/ that every project receives: not its harness/ directory (see base_harness_module)."""
+    return {rel: data for rel, data in collect_tree(base_dir or BASE_DIR).items()
+            if rel.split("/")[0] != BASE_HARNESS_DIR}
+
+
+def base_harness_module():
+    """base/harness/<harness>/ is read like a module's harness directory, supplied by the name `base`."""
+    return {"name": BASE_SUPPLIER, "path": BASE_DIR}
 
 
 def scan_project(project, skipped=None):
@@ -1287,7 +1378,7 @@ def apply_slots(text, order, fragments, relpath="<file>"):
 
 def assemble(module_names, modules, base_dir=None):
     """Build the output tree {relpath: bytes} for base plus the given modules."""
-    tree = collect_tree(base_dir or BASE_DIR)
+    tree = base_tree(base_dir)
     owners = {path: "base" for path in tree}
     folded = {path.casefold(): path for path in tree}
     for name in module_names:
@@ -1920,7 +2011,7 @@ def validate_harness_record(manifest):
         raise InstallError("%s has an unknown harness" % MANIFEST)
     spec = HARNESSES[harness]
     ok = isinstance(record, dict) and len(record) <= HARNESS_FILES_MAX
-    known = set(manifest.get("modules", [])) | set(manifest.get("external_modules", {}))
+    known = set(manifest.get("modules", [])) | set(manifest.get("external_modules", {})) | {BASE_SUPPLIER}
     seen = set()
     for key, entry in (record.items() if ok else ()):
         modules = entry.get("modules") if isinstance(entry, dict) else None
@@ -2070,6 +2161,9 @@ def cmd_new(args, out):
         )
         selected = parse_with(answer.split())
     entries = parse_entries(selected)
+    entries, args.harness, retired_notes = take_retired(entries, args.harness)
+    if args.harness is not None:
+        harness_spec(args.harness)
     builtin = set(modules)
     entries, registered = registered_entries(args, entries, builtin)
     externals = load_externals(
@@ -2081,11 +2175,17 @@ def cmd_new(args, out):
     tree = assemble(names, modules)
     substitute(tree, name)
     harness_plan, trees = None, {}
+    ignore_notes = []
     check_module_harness_dirs(names, modules)
     if args.harness is not None:
-        trees = prepare_harness(names, modules, args.harness, name)
+        trees = prepare_harness(names, modules, args.harness, name, include_base=True)
         harness_plan = plan_harness(trees, args.harness, {}, {})
         tree.update(harness_plan.writes)
+        current = tree.get(IGNORE_FILE, b"").decode("utf-8")
+        updated, note = apply_ignore_block(current, args.harness)
+        tree[IGNORE_FILE] = updated.encode("utf-8")
+        if note:
+            ignore_notes.append(note)
     identity = None
     if not args.dry_run:
         identity = resolve_identity(args, interactive)
@@ -2105,8 +2205,12 @@ def cmd_new(args, out):
     pulled = sorted(set(names) - set(selected))
     if pulled:
         out("Required modules added: %s" % ", ".join(pulled))
+    for note in retired_notes:
+        out("  note: %s" % note)
     if harness_plan:
         report_harness(out, harness_plan, args.harness, trees)
+        for note in ignore_notes:
+            out("  note: %s" % note)
     if args.dry_run:
         for rel in sorted(tree):
             out("  would write %s" % rel)
@@ -2150,8 +2254,6 @@ def cmd_list(args, out):
     for name in sorted(modules):
         meta = modules[name]
         flags = []
-        if meta["harness"]:
-            flags.append("harness")
         if meta["requires"]:
             flags.append("requires " + ",".join(meta["requires"]))
         suffix = " (%s)" % "; ".join(flags) if flags else ""
@@ -2233,7 +2335,7 @@ def cmd_unregister(args, out):
 
 def owned_paths(modules, names):
     """Casefolded paths the template ships: the base plus the files of `names`."""
-    owned = {rel.casefold() for rel in collect_tree(BASE_DIR)}
+    owned = {rel.casefold() for rel in base_tree()}
     for name in names:
         if name in modules:
             owned |= {rel.casefold() for rel in
@@ -2247,10 +2349,15 @@ def cmd_add(args, out):
     builtin = set(modules)
     manifest = load_manifest(project, builtin)
     installed = list(manifest["modules"])
+    for name in installed:
+        if name in RETIRED_MODULES:
+            raise InstallError("this project lists the retired module %s; run a full --update first to migrate "
+                               "it to --harness %s" % (name, RETIRED_MODULES[name]))
     recorded = dict(manifest.get("external_modules", {}))
-    harness = choose_harness(args.harness, manifest.get("harness"), introduce=True)
-    activating = harness is not None and "harness" not in manifest
     entries = parse_entries(args.add)
+    entries, option_harness, retired_notes = take_retired(entries, args.harness)
+    harness = choose_harness(option_harness, manifest.get("harness"), introduce=True)
+    activating = harness is not None and "harness" not in manifest
     # A recorded external module is never re-read: its store may have moved.
     fresh = [(n, v) for n, v in entries if n not in recorded]
     fresh, registered = registered_entries(args, fresh, builtin)
@@ -2293,7 +2400,8 @@ def cmd_add(args, out):
     check_module_harness_dirs(new, modules)
     if harness:
         wanted_here = [n for n in wanted if n in modules and (activating or n in new)]
-        trees = prepare_harness(wanted_here, modules, harness, project_name, installed=wanted)
+        trees = prepare_harness(wanted_here, modules, harness, project_name, installed=wanted,
+                                include_base=activating)
         harness_plan = plan_harness(trees, harness, existing,
                                     manifest.get("harness_files", {}), project)
     existing.update(writes)
@@ -2318,8 +2426,17 @@ def cmd_add(args, out):
             + ", ".join("%s:%s" % pair for pair in sorted(missing))
         )
     writes.update(patched)
+    ignore_note = None
     if harness_plan:
         writes.update(harness_plan.writes)
+        if activating:
+            current = decode_ignore(writes.get(IGNORE_FILE, existing.get(IGNORE_FILE, b"")))
+            if current is None:
+                ignore_note = NOT_TEXT_NOTE
+            else:
+                updated, ignore_note = apply_ignore_block(current, harness)
+                if updated != current or IGNORE_FILE not in existing:
+                    writes[IGNORE_FILE] = updated.encode("utf-8")
         manifest["schema"] = HARNESS_SCHEMA
         manifest["harness"] = harness
         manifest["harness_files"] = harness_plan.record
@@ -2342,8 +2459,12 @@ def cmd_add(args, out):
     writes[MANIFEST] = encode_manifest(manifest)
 
     out("Adding modules: %s" % (", ".join(new) or "none"))
+    for note in retired_notes:
+        out("  note: %s" % note)
     if harness_plan:
         report_harness(out, harness_plan, harness, trees)
+        if ignore_note:
+            out("  note: %s" % ignore_note)
         if activating and recorded:
             out("  note: the harness files of external modules already installed (%s) were "
                 "not read, so none were installed" % ", ".join(sorted(recorded)))
@@ -2561,8 +2682,27 @@ def cmd_update(args, out):
     manifest = load_manifest(project, builtin)
     installed = list(manifest["modules"])
     recorded = dict(manifest.get("external_modules", {}))
-    harness = choose_harness(args.harness, manifest.get("harness"), introduce=False)
     entries = parse_entries(args.update)
+    retired = [n for n in installed if n in RETIRED_MODULES]
+    migrating = bool(retired) and not entries
+    if migrating:
+        wanted_harness = RETIRED_MODULES[retired[0]]
+        if args.harness not in (None, wanted_harness) or manifest.get("harness") not in (None, wanted_harness):
+            raise InstallError("this project lists the retired module %s (harness %s) but another harness is "
+                               "chosen or recorded; it cannot be migrated" % (retired[0], wanted_harness))
+        harness = wanted_harness
+        installed = [n for n in installed if n not in RETIRED_MODULES]
+        manifest["modules"] = installed
+        for key in ("module_commits", "module_info"):
+            if key in manifest:
+                manifest[key] = {k: v for k, v in manifest[key].items() if k not in RETIRED_MODULES}
+                if not manifest[key]:
+                    del manifest[key]
+        manifest["schema"] = HARNESS_SCHEMA
+        manifest["harness"] = harness
+        manifest.setdefault("harness_files", {})
+    else:
+        harness = choose_harness(args.harness, manifest.get("harness"), introduce=False)
     for name, value in entries:
         if name in recorded:
             continue
@@ -2576,6 +2716,9 @@ def cmd_update(args, out):
     notes = []
     if entries:
         targets = [n for n, _ in entries if n not in recorded]
+        for name in retired:
+            notes.append("%s is retired as a module; a full --update migrates the project to --harness %s"
+                         % (name, RETIRED_MODULES[name]))
     else:
         targets = present
         for name in installed:
@@ -2616,7 +2759,7 @@ def cmd_update(args, out):
                              None, data])
             else:
                 writes[rel] = data
-    base_files = collect_tree(BASE_DIR)
+    base_files = base_tree()
     substitute(base_files, project_name)
     compared.update(base_files)
     compared.difference_update(rel for rel, _ in skipped or ())
@@ -2632,9 +2775,29 @@ def cmd_update(args, out):
     harness_plan, trees = None, {}
     check_module_harness_dirs(targets, modules)
     if harness:
-        trees = prepare_harness(targets, modules, harness, project_name, installed=present)
+        trees = prepare_harness(targets, modules, harness, project_name, installed=present,
+                                include_base=not entries)
         harness_plan = plan_harness(trees, harness, existing, manifest["harness_files"], project)
         writes.update(harness_plan.writes)
+        if not entries:
+            current = decode_ignore(writes.get(IGNORE_FILE, existing.get(IGNORE_FILE, b"")))
+            if current is None:
+                notes.append(NOT_TEXT_NOTE)
+            elif migrating:
+                try:
+                    ranked = sorted(list(present) + retired, key=lambda n: (
+                        modules[n]["order"] if n in modules else RETIRED_ORDERS[n], n))
+                    current, _, _ = refresh_blocks(current, ranked, {}, IGNORE_FILE, drop=set(retired),
+                                                   expect={n: RETIRED_FRAGMENTS[n] for n in retired})
+                except (ValueError, InstallError) as exc:
+                    notes.append("%s: the retired module's block was left (%s)" % (IGNORE_FILE, exc))
+                    current = decode_ignore(writes.get(IGNORE_FILE, existing.get(IGNORE_FILE, b"")))
+            if current is not None:
+                updated, ignore_note = apply_ignore_block(current, harness)
+                if ignore_note:
+                    notes.append(ignore_note)
+                elif updated != current or IGNORE_FILE not in existing:
+                    writes[IGNORE_FILE] = updated.encode("utf-8")
 
     bases = BaseFinder(manifest, project_name, set(recorded))
     outcome = {}
@@ -2700,7 +2863,7 @@ def cmd_update(args, out):
     report_safely(out, targets, modules, harness,
                   harness_plan.record if harness_plan else {}, args.global_config,
                   dry_run=args.dry_run)
-    record_changed = bool(harness_plan) and harness_plan.record != manifest["harness_files"]
+    record_changed = bool(harness_plan) and (migrating or harness_plan.record != manifest["harness_files"])
     info = dict(manifest.get("module_info", {}))
     if not entries:
         # Declared by the template, so a full run rebuilds it; a module the
@@ -2777,6 +2940,13 @@ def cmd_remove(args, out):
     recorded = dict(manifest.get("external_modules", {}))
     names = list(dict.fromkeys(args.remove))
     for name in names:
+        if name == BASE_SUPPLIER:
+            raise InstallError("%r is the template's own supplier name, not a module" % name)
+        if name in RETIRED_MODULES:
+            raise InstallError("%s is retired as a module and is replaced by --harness %s; run a full "
+                               "--update to migrate a project that lists it"
+                               % (name, RETIRED_MODULES[name]))
+    for name in names:
         if name not in installed and name not in recorded:
             raise InstallError("module %r is not installed in this project" % name)
     for other in installed:
@@ -2820,7 +2990,7 @@ def cmd_remove(args, out):
         if new_text != text:
             writes[rel] = new_text.encode("utf-8")
 
-    keep = {rel.casefold() for rel in collect_tree(BASE_DIR)}
+    keep = {rel.casefold() for rel in base_tree()}
     for name in installed:
         if name not in names and name in modules:
             keep |= {rel.casefold() for rel in

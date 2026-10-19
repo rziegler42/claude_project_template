@@ -1,7 +1,7 @@
 # Module harness files
 
 Status: Approved (2026-10-19)
-Updated: 2026-10-19
+Updated: 2026-10-19 (amended by plan 0023: base harness files, the harness ignore block, retired modules)
 
 Requirements for letting a module, built-in or external, carry the harness-specific files that
 serve it (skills, agents, commands), installed into the project's own harness directory. The
@@ -17,7 +17,8 @@ yet; the roadmap orders the plans that do.
 - **Harness directory**: `harness/<harness>/` inside a module (`modules/<m>/harness/<h>/` for a
   built-in, `template-module/harness/<h>/` for an external store).
 - **Harness root**: the project directory the table maps a harness to (`.claude/` for `claude`).
-- **Supplier**: a module whose harness file is installed at a path. A path may have several.
+- **Supplier**: a module whose harness file is installed at a path, or the reserved name `base` for the
+  template's own base harness files. A path may have several.
 - **Unit**: the collision unit of a harness path: `skills/<name>/` (the whole directory), or one
   file for every other path.
 - **Approval**: the owner's recorded pin of an external store's harness tree to a digest.
@@ -423,6 +424,8 @@ Effective when ADR 0004 is Accepted and this document is Approved. Each record g
 | ADR 0002 | Trust model and mitigations | Addendum (plan Increment B) |
 | ADR 0004 | Decision 6: approval "recorded in the registry"; "refuse a changed store" for `--update` | Recorded in a file beside the registry; a full `--update` skips a changed store (Approval). ADR 0004 was amended in its text on Acceptance |
 | ADR 0004 | Decision 6: static findings include symlinks and size limits | Those are refusals; the findings are executables and advisory phrases |
+| This specification | Terms: a supplier is a module; Manifest: `modules` lists installed modules | Plus the reserved supplier `base` (plan 0023) |
+| README, "Writing a module" | Only modules marked `"harness": true` may be harness-specific | The flag is retired; harness files go in `harness/<harness>/`, and a module named for its tool may name it (plan 0023) |
 
 README "Boundaries" and "Writing a module" change with the implementation plans, not here.
 
@@ -521,6 +524,84 @@ hash and the owner running `--remove` bound it, and git history recovers the fil
 13. Read-only: a checksum of a store is identical before and after every command including
     `--dry-run`, and no program runs.
 14. All existing tests still pass and a project without a harness is unchanged byte for byte.
+
+### Acceptance criteria added by plan 0023
+
+15. Base harness files (plan 0023): `--new --harness claude` installs the base files with the project id
+    substituted, recorded with supplier `base`; none without a harness; activation installs them once;
+    `--update` replaces an unedited base file and keeps an edited one; `--remove` never deletes or unrecords a
+    `base` path; a record naming `base` loads and another unknown supplier does not; a `base` path equal to a
+    `base/` or `files/` path is refused; `harness.json` in the base directory and a module named `base` are
+    refused.
+16. Ignore block: a recorded harness adds one `harness:claude` block to `.gitignore`; activation adds it once;
+    `--update` restores an edited block and leaves other text alone; inexact or duplicated markers leave the
+    file alone with a note; a symlinked or non-regular `.gitignore` is refused before any write.
+17. Retired modules: `--with claude` and `--add claude` act as `--harness claude` with a note and are refused
+    beside a different harness; `--list` shows none; `--remove claude` writes nothing; `--update` migrates a
+    project created by the previous installer with `--with claude` and a second run changes nothing; a
+    different recorded harness refuses the migration; an edited old gitignore block is left; the migration
+    reads no path from the manifest.
+18. A built-in `module.json` with a `harness` key is refused; `--list` shows no harness mark.
+
+## Base harness files, the ignore block and retired modules
+
+Added by plan 0023, which implements ADR 0004 decision 3 (the `"harness": true` flag is retired and the
+`claude` module's entry-point files become the base harness directory).
+
+**Base harness files.**
+
+- `base/harness/<harness>/` has the layout, allowlist (the built-in column), path rules, limits, marker and
+  frontmatter rules of a module's harness directory, except that `harness.json` is refused (only a module can
+  declare roles). Its files are installed whenever a harness is recorded for that harness: by `--new`, by the
+  activation of `--add --harness`, and refreshed by `--update`. They count toward the per-run limits.
+- The supplier name is `base`. It is reserved: a built-in module or an external store named `base` is refused.
+  In `harness_files`, `modules` may contain `base` without `base` being in `modules` or `external_modules`; the
+  rest of the validation is unchanged, and `base` sorts with the other names.
+- Collisions: a `base` path may not equal a `base/` path or any module's `files/` path (reserved paths), and
+  two suppliers of one path must agree, as for modules. Existing project files follow the four collision
+  rules, so an identical `CLAUDE.md` is adopted and recorded for `base`.
+- `--update` refreshes `base` files under the update rules (the record is the baseline). `--remove` never
+  deletes or unrecords a path whose record lists `base`, and removing the last module leaves them in place.
+- Placeholders are the ordinary ones (`REPLACE_WITH_PROJECT_NAME`, `REPLACE_WITH_PROJECT_ID`), under the same
+  project-name restriction as module harness files.
+
+**The harness ignore block.** The harness table gains `gitignore`, a list of ignore lines (for `claude`:
+`/.claude/settings.local.json`). When a harness is recorded, the project's `.gitignore` holds one block:
+
+```text
+# BEGIN harness:claude
+/.claude/settings.local.json
+# END harness:claude
+```
+
+- The block is added at the end when absent, by `--new`, by activation and by `--update`, and restored when its
+  content differs; text outside the markers is never touched. If the markers are not exact lines, or appear
+  more than once, the file is left alone and the run says so. The block is not a module block and the module
+  block machinery ignores it. `--remove` leaves it.
+- `.gitignore` goes through the ordinary write path: a symlinked or non-regular `.gitignore`, or a symlinked
+  parent, is refused before any write; a missing `.gitignore` is created.
+
+**Retired modules.** The installer holds a table of retired module names (`claude`, whose replacement is
+`--harness claude`).
+
+- `--with claude` and `--add claude` mean `--harness claude` and print that the module is retired; with a
+  different `--harness` value the run is refused before any write. A retired name is not listed by `--list`,
+  and is reserved for external stores.
+- `--remove claude` is refused, naming the replacement, and writes nothing.
+- `--update` migrates a project whose manifest lists a retired name, when the project has no harness or the
+  retired name's harness: it drops the name from `modules`, `module_commits` and `module_info`, records the
+  harness (`schema` 2), applies the base files under the collision rules (identical files adopted, differing
+  files left and reported), and replaces the old `BEGIN module:claude slot:gitignore` block, when it still equals
+  the module's old fragment text, by the harness ignore block (an edited old block is left and the new block is
+  added). With a different recorded harness the migration is refused with a message. The migration names no
+  path the manifest supplies, and a second `--update` changes nothing.
+
+**The retired `harness` key.** A built-in `module.json` with a `harness` key is refused when the module loads,
+naming `harness/<name>/` as the replacement. `--list` shows no harness mark.
+
+**Neutrality.** A module named for its own tool (`codex`) may name that tool and its helper in its slots; every
+other module's committed text stays tool-neutral. Harness files, which are installed only under a recorded
+harness, are exempt from the scan as before.
 
 ## Open points from ADR 0004
 

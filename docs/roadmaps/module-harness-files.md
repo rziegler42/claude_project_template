@@ -55,8 +55,7 @@ cover the harness files like other module files. Built-in modules only.
 **Boundary:** no declarations and no external stores yet. The plan also carries the specification's
 `write_tree` mode change (every harness write `0644 & ~umask`), the `schema` 2 manifest and the
 `harness_files` record, which every later candidate builds on.
-**Promotion trigger:** candidate 1 complete. Met. Promoted 2026-10-19: the plan is drafted in
-`docs/plans/next.md` and waits for the owner's approval.
+**Promotion trigger:** candidate 1 complete. Met. Promoted 2026-10-19 and implemented as plan 0023.
 
 ### 3. Pilot: `cad-freecad` and `freecad-scripts` (template side done 2026-10-19, plan 0019)
 
@@ -88,7 +87,7 @@ generic core and no longer refreshes after a commit.
 **Promotion trigger:** candidate 4 complete. Met. The template side is done (plan 0022); removing
 the Graphify commands, skill and agent from `claude_global_config` is separate work there.
 
-### 6. `plan-review`, `codex` and the `claude` module
+### 6. `plan-review`, `codex` and the `claude` module (done 2026-10-19, plan 0023)
 
 **Outcome:** `second-opinion` moves into the harness directory, `codex` becomes a neutral tool
 module, `"harness": true` is retired, and the `claude` module's files become the base harness

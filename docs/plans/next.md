@@ -1,6 +1,6 @@
 # Retire the harness flag: claude as base harness files, codex as a tool module
 
-Status: Approved
+Status: Complete
 Created: 2026-10-19
 
 ## Goal
@@ -217,5 +217,35 @@ Completion: the findings are decided and the suite is green.
 
 ## Result
 
-<!-- Complete this only after verification. Archive the plan according to
-docs/plans/README.md, then reset this file to the empty template. -->
+Increments A to G are implemented and verified; nothing is committed beyond the approved plan.
+
+- **Base harness files:** `base/harness/claude/` (`root/CLAUDE.md`, `remote-runner.toml`) installs with every
+  `--harness claude` project, recorded with the reserved supplier `base`; `base_tree()` keeps `base/harness/`
+  out of every ordinary base walk; `harness.json` in the base directory and a module named `base` are refused;
+  `--remove` never touches a base path and refuses the name `base`.
+- **Ignore block:** `# BEGIN harness:claude` / `# END harness:claude` with `/.claude/settings.local.json` in
+  `.gitignore`, added on new/activation and restored by a full `--update`; symlinked, CRLF, duplicated,
+  reversed-marker and non-UTF-8 files are left alone with a note.
+- **Retired `claude` module:** `--with`/`--add claude` act as `--harness claude` with a note; `--remove claude`
+  is refused; a full `--update` migrates a project that lists it (schema 2, harness record, old module block
+  replaced when unedited); a named `--add` on an unmigrated project says to run a full `--update` first. The
+  `harness` key in a built-in `module.json` is refused; `--list` has no `(harness)` mark.
+- **codex:** a tool module declaring `helpers: ["ask-codex"]`; slots name Codex and `ask-codex` only; the
+  `second-opinion` skill ships under `harness/claude/` (copied from `claude_global_config` commit
+  `0cc39dc0e0fe0bd0803fb2bd5bbbfad224e6ccac`, identical to the installed copy).
+- **Tests and docs:** 671 tests pass (`python3 -I -m unittest discover -s tests`), `git diff --check` clean;
+  README, spec and roadmap updated. About 40 older tests moved off `claude` as a fixture module.
+- **Verification:** a project built with `b1af3e9` (`--with claude,codex,graphify`) migrates with `--update`
+  and a second `--update` changes nothing; it matches a fresh `--harness claude` project. Seven mutations on
+  scratch copies: six killed, one equivalent (`harness.json` in the base directory is also refused by a later
+  check). Adversarial review by `security-reviewer` (partial: turn limit): no Critical or High; Low findings
+  fixed with failing-first tests: a forged manifest could run `--remove base`; a non-UTF-8 `.gitignore`
+  crashed `--add`/`--update`; the unmigrated named-`--add` message was unclear.
+- **Unchecked or accepted:** `--merge` interaction with the harness block; after migration every full
+  `--update` reports `.gitignore` as kept (no merge base); history rebuilds across the commit that dropped
+  `"harness": true` return no merge base; `--add` then `--remove` after `plan-review` fails with a block-layout
+  error in `b1af3e9` as well (existing behaviour, not addressed); an old installer fails closed on a migrated
+  manifest only when the record has a `base` entry.
+- **Owner follow-up (global side, not done here):** in `claude_global_config`, remove `skills/second-opinion`,
+  its `config-manifest.txt` lines and tests. Removing the `--with claude` alias is a later release.
+- **Next action:** commit on request, then archive as plan 0023 and promote roadmap candidate 8.

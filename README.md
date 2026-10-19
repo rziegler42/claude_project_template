@@ -160,7 +160,7 @@ path for one run, or register it once on this machine:
 ```sh
 ./install.py --register ~/projects/my_kb [--name my_kb] [--dry-run]
 ./install.py --list                                   # built-in modules, then registered stores
-./install.py ../my-project --with claude,my_kb        # registered name
+./install.py ../my-project --with graphify,my_kb      # registered name
 ./install.py ../my-project --with scratch=~/projects/my_kb   # name=path, no registration
 ~/projects/claude_project_template/install.py --add my_kb     # in an existing project
 ./install.py --unregister my_kb
@@ -227,8 +227,7 @@ the trust model, mitigations, and accepted residuals. In practice:
 - `base/` — files every project receives (instructions, docs skeleton,
   plan/roadmap/spec/decision conventions).
 - `modules/<name>/` — opt-in content:
-  - `module.json` — `description`, `requires`, `order`, optional `harness`,
-    and optional `hint` (one printable line, at most 200 characters) that the
+  - `module.json` — `description`, `requires`, `order`, and optional `hint` (one printable line, at most 200 characters) that the
     installer prints under "Next steps" after a new install or `--add`, and
     optional `type`, `paths` and `data` (see [Module info](#module-info)), and
     optional `helpers`, `workers` and `global_config` (see
@@ -250,10 +249,9 @@ the trust model, mitigations, and accepted residuals. In practice:
 
 | Module | Purpose |
 |---|---|
-| `claude` | Claude Code entry point (`CLAUDE.md` importing `AGENTS.md`), local-settings ignore line, and a `.claude/remote-runner.toml` stub with the project id and no active profile (harness) |
 | `graphify` | Graphify discovery/impact policy, `.graphifyignore`, plan evidence section, and the `tools/graphify` workflow tool; with `--harness claude`, also the `graphify-workflow` skill and the `graphify-semantic` agent |
 | `plan-review` | Tool-neutral policy for an independent, bounded, read-only review of the plan, and a Second opinion receipt in the plan and its archive |
-| `codex` | Codex plan review through the `ask-codex` helper and `second-opinion` skill: request, limits, owner-only commands, state, and mapping to the plan's receipt; requires `plan-review` (harness) |
+| `codex` | Codex plan review through the `ask-codex` helper: request, limits, owner-only commands, state, and mapping to the plan's receipt; with `--harness claude`, also the `second-opinion` skill; requires `plan-review` |
 | `formal` | Tool-neutral formal verification guidance; with `--harness claude`, also the `verilog-sby-formal` skill |
 | `cad` | Tool-neutral CAD workflow (`docs/cad.md`) |
 | `cad-freecad` | FreeCAD conventions; requires `cad`; with `--harness claude`, also the `freecad-scripts` skill |
@@ -315,9 +313,10 @@ location chosen at install time is an external module's `store`.
    a slot with no marker anywhere is an error.
 4. Keep committed content neutral: name capabilities and policy, never a
    private helper or skill. Harness-specific content goes in
-   `harness/<harness>/`; a module whose whole purpose is bound to one tool,
-   such as `codex`, may still be marked `"harness": true` (the flag is retired
-   later) and requires the neutral module that holds the policy.
+   `harness/<harness>/`. A module named for a tool, such as `codex`, may name
+   that tool and its helper, but never a harness skill, slash command or harness;
+   it requires the neutral module that holds the policy. The `"harness"` key in
+   `module.json` is retired and refused.
 5. Skills, agents and commands that serve the module go under
    `harness/<harness>/`, not in `files/` (see [Harness files](#harness-files)).
 6. Run the tests; add a case if the module introduces new behavior.
@@ -345,7 +344,14 @@ is to add the marker line by hand or create the project again.
 A built-in module may ship the files that serve it for one coding harness, such as
 Claude Code skills and agents, instead of leaving them in a developer's global
 configuration. They live in `modules/<name>/harness/<harness>/`; the installer owns the
-table of harnesses, which has one entry, `claude` (root `.claude/`).
+table of harnesses, which has one entry, `claude` (root `.claude/`). The template's own
+harness files, `CLAUDE.md` (importing `AGENTS.md`) and the `.claude/remote-runner.toml`
+stub with the project id, live in `base/harness/claude/` and install with every
+`--harness claude` project, recorded with the supplier `base`; `--harness claude` also
+adds a `# BEGIN harness:claude` block to `.gitignore` for `/.claude/settings.local.json`.
+The former `claude` module is retired: `--with claude` and `--add claude` act as
+`--harness claude` with a note, `--remove claude` is refused, and a full `--update` of a
+project that lists it migrates the project to the harness record.
 
 ```text
 modules/<name>/harness/claude/
@@ -381,7 +387,8 @@ modules/<name>/harness/claude/
   projects keep `schema` 1 and are unchanged. An installer from before this feature
   refuses a `schema` 2 manifest (it fails closed with a "malformed" error and writes
   nothing), so update the template checkout before running it on such a project.
-- Three modules ship harness files so far. With `--harness claude`, `cad-freecad` installs
+- Four modules ship harness files so far. With `--harness claude`, `codex` installs the
+  `second-opinion` skill, `cad-freecad` installs
   the `freecad-scripts` skill (a `SKILL.md`, ten references and a mesh script) into
   `.claude/skills/freecad-scripts/`, `formal` installs the `verilog-sby-formal` skill
   (`SKILL.md` and `reference.md`) into `.claude/skills/verilog-sby-formal/`, and `graphify`

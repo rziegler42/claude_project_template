@@ -1,7 +1,11 @@
 {
-  "description": "Codex plan review through the ask-codex helper and second-opinion skill: commands, limits, state, and receipt mapping (harness)",
-  "requires": ["plan-review"],
+  "description": "Codex plan review through the ask-codex helper: commands, limits, state, and receipt mapping",
+  "requires": [
+    "plan-review"
+  ],
   "order": 16,
-  "harness": true,
-  "hint": "ask Claude to have Codex review the plan, or run /second-opinion; the ask-codex helper must be installed from the global configuration"
+  "hint": "ask for a review of the plan (have Codex review it); the ask-codex helper must be installed on the machine",
+  "helpers": [
+    "ask-codex"
+  ]
 }

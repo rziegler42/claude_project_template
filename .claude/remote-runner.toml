@@ -1,5 +1,5 @@
 # Remote-runner contract for this template repository itself (not shipped to
-# generated projects; see modules/claude for their stub).
+# generated projects; see base/harness/claude for their stub).
 [project]
 id = "claude-project-template"
 

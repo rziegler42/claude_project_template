@@ -1,6 +1,0 @@
-{
-  "description": "Claude Code entry point: CLAUDE.md importing AGENTS.md, and the local-settings ignore line",
-  "requires": [],
-  "order": 5,
-  "harness": true
-}

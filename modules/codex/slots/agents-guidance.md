@@ -1,10 +1,10 @@
 ## Codex plan review
 
 - Ask for a review of `docs/plans/next.md` with a request such as
-  "have Codex review the plan", or run `/second-opinion`. The `second-opinion`
-  skill drives the `ask-codex review-plan` helper. Use it only when the owner
-  asks, and only on a plan with `Status: Proposed`.
-- Codex is read-only; Claude is the only writer and edits only the plan. Rounds
+  "have Codex review the plan". The review runs through `ask-codex review-plan`,
+  a helper installed on the machine and not by this project. Use it only when
+  the owner asks, and only on a plan with `Status: Proposed`.
+- Codex is read-only; the coding agent is the only writer and edits only the plan. Rounds
   are bounded: 3 rounds by default, never more than 5 per request, and the
   helper owns the counter.
 - Each blocker and major finding is applied or rejected, and a rejection

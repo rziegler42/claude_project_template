@@ -21,7 +21,7 @@ spec.loader.exec_module(install)
 SENTINEL_EMAIL = "sentinel-global@example.invalid"
 HARNESS_NAMES = ["claude-workflow", "remote-runner", "freecad-scripts", "graphify-semantic", "superpowers",
                  "ask-codex", "second-opinion", "codex"]
-ALL = "cad-freecad,graphify,formal,claude"
+ALL = "cad-freecad,graphify,formal,plan-review"
 
 
 def run(argv, stdin_tty=False):
@@ -86,6 +86,19 @@ def read_tree(root):
     return tree
 
 
+def without_harness_blocks(text):
+    """`text` without the harness's own `# BEGIN harness:` ... `# END harness:` ignore blocks."""
+    return re.sub(r"# BEGIN harness:(\w+)\n.*?# END harness:\1\n", "", text, flags=re.S)
+
+
+# Modules named after a tool, not a harness: they may name that tool (Codex) in project guidance.
+TOOL_MODULES = ("codex",)
+
+
+def neutral_modules():
+    return [n for n in install.load_modules() if n not in TOOL_MODULES]
+
+
 def neutrality_problems(root):
     """(path, name) pairs where tool-specific names appear outside installed harness files."""
     with open(os.path.join(root, ".template-manifest"), encoding="utf-8") as handle:
@@ -93,7 +106,7 @@ def neutrality_problems(root):
     # The manifest lists the installed harness paths, so it is a record, not guidance.
     return [(path, needle) for path, text in read_tree(root).items()
             if path not in recorded and path != ".template-manifest"
-            for needle in HARNESS_NAMES if needle in text]
+            for needle in HARNESS_NAMES if needle in without_harness_blocks(text)]
 
 
 class InstallerTest(unittest.TestCase):
@@ -136,18 +149,18 @@ class InstallerTest(unittest.TestCase):
                 "--git-name", "Test User", "--git-email", "tester@users.noreply.example.invalid"]
 
     def test_with_forms_select_the_same_modules(self):
-        forms = (("claude,graphify",), ("claude", "graphify"), ("claude,", "graphify"))
+        forms = (("plan-review,graphify",), ("plan-review", "graphify"), ("plan-review,", "graphify"))
         for index, form in enumerate(forms):
             with self.subTest(form=form):
                 code, out, err = run([self.target("p%d" % index), *self.new_argv(*form)[1:]])
                 self.assertEqual(code, 0, err)
                 with open(os.path.join(self.target("p%d" % index), ".template-manifest")) as handle:
-                    self.assertEqual(json.load(handle)["modules"], ["claude", "graphify"])
+                    self.assertEqual(json.load(handle)["modules"], ["graphify", "plan-review"])
 
     def test_with_mixes_spaces_and_commas_in_order(self):
-        code, out, err = run(self.new_argv("graphify,claude", "cad"))
+        code, out, err = run(self.new_argv("graphify,plan-review", "cad"))
         self.assertEqual(code, 0, err)
-        self.assertEqual(sorted(self.created_modules()), ["cad", "claude", "graphify"])
+        self.assertEqual(sorted(self.created_modules()), ["cad", "graphify", "plan-review"])
 
     def test_with_help_uses_module_placeholder(self):
         text = install.build_parser().format_help()
@@ -155,7 +168,7 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn("WITH_", text)
 
     def test_target_swallowed_by_with_gets_ordering_hint(self):
-        argv = ["--with", "claude", self.target(), "--git-name", "Test User",
+        argv = ["--with", "graphify", self.target(), "--git-name", "Test User",
                 "--git-email", "tester@users.noreply.example.invalid"]
         captured = io.StringIO()
         with unittest.mock.patch("sys.stderr", captured), self.assertRaises(SystemExit) as raised:
@@ -165,9 +178,9 @@ class InstallerTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.target()))
 
     def test_with_still_conflicts_with_other_modes(self):
-        for mode in (["--update"], ["--remove", "claude"], ["--register", self.work]):
+        for mode in (["--update"], ["--remove", "graphify"], ["--register", self.work]):
             with self.subTest(mode=mode):
-                code, out, err = run(mode + ["--with", "claude", "graphify"])
+                code, out, err = run(mode + ["--with", "plan-review", "graphify"])
                 self.assertEqual(code, 2)
                 self.assertIn("--with", err)
 
@@ -195,7 +208,7 @@ class InstallerTest(unittest.TestCase):
         code, out, err = self.new(ALL)
         self.assertEqual(code, 0, err)
         tree = read_tree(self.target())
-        self.assertIn("CLAUDE.md", tree)
+        self.assertNotIn("CLAUDE.md", tree)
         self.assertIn(".graphifyignore", tree)
         self.assertIn("docs/cad.md", tree)
         self.assertIn("## Graphify", tree["AGENTS.md"])
@@ -204,7 +217,7 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("### FreeCAD", tree["AGENTS.md"])
         self.assertIn("/graphify-out/", tree[".gitignore"])
         self.assertIn("*.FCBak", tree[".gitignore"])
-        self.assertIn("/.claude/settings.local.json", tree[".gitignore"])
+        self.assertNotIn("settings.local.json", tree[".gitignore"])
         self.assertIn("Discovery and impact evidence", tree["docs/plans/next.md"])
         self.assertIn("FreeCAD configuration", tree["docs/cad.md"])
         self.assertIn("freecadcmd", tree["docs/development.md"])
@@ -234,17 +247,14 @@ class InstallerTest(unittest.TestCase):
                 self.assertEqual(code, 0, err)
 
     def test_neutrality_outside_harness_modules(self):
-        modules = install.load_modules()
-        non_harness = [n for n, m in modules.items() if not m["harness"]]
-        self.new(",".join(non_harness))
+        self.new(",".join(neutral_modules()))
         self.assertEqual(neutrality_problems(self.target()), [])
 
     def test_neutrality_with_a_harness_ignores_only_installed_harness_files(self):
-        modules = install.load_modules()
-        non_harness = [n for n, m in modules.items() if not m["harness"]]
-        code, out, err = self.new(",".join(non_harness), extra=["--harness", "claude"])
+        code, out, err = self.new(",".join(neutral_modules()), extra=["--harness", "claude"])
         self.assertEqual(code, 0, err)
         self.assertEqual(neutrality_problems(self.target()), [])
+        self.assertIn("CLAUDE.md", json.loads(read_tree(self.target())[".template-manifest"])["harness_files"])
         self.assertIn(".claude/skills/freecad-scripts/SKILL.md",
                       json.loads(read_tree(self.target())[".template-manifest"])["harness_files"])
 
@@ -261,7 +271,7 @@ class InstallerTest(unittest.TestCase):
     STUB = ".claude/remote-runner.toml"
 
     def test_runner_stub_shipped_with_claude(self):
-        code, out, err = self.new("claude", name="my-project")
+        code, out, err = self.new("", name="my-project", extra=["--harness", "claude"])
         self.assertEqual(code, 0, err)
         tree = read_tree(self.target("my-project"))
         self.assertIn(self.STUB, tree)
@@ -276,7 +286,7 @@ class InstallerTest(unittest.TestCase):
             import tomllib
         except ImportError:
             self.skipTest("tomllib needs Python 3.11+")
-        self.new("claude")
+        self.new("", extra=["--harness", "claude"])
         with open(os.path.join(self.target(), self.STUB), "rb") as handle:
             data = tomllib.load(handle)
         self.assertEqual(list(data), ["project"])
@@ -287,9 +297,9 @@ class InstallerTest(unittest.TestCase):
         self.assertNotIn(self.STUB, read_tree(self.target()))
 
     def test_runner_id_is_slugged_from_name(self):
-        for name, expected in (("My Project", "My-Project"), ('a"b\\c', "a-b-c"), ("x_y-1", "x_y-1")):
+        for name, expected in (("My Project", "My-Project"), ("a b.c", "a-b-c"), ("x_y-1", "x_y-1")):
             with self.subTest(name=name):
-                code, out, err = self.new("claude", name="p", extra=["--name", name])
+                code, out, err = self.new("", name="p", extra=["--name", name, "--harness", "claude"])
                 self.assertEqual(code, 0, err)
                 text = read_tree(self.target("p"))[self.STUB]
                 self.assertIn('id = "%s"' % expected, text)
@@ -300,11 +310,11 @@ class InstallerTest(unittest.TestCase):
         shutil.rmtree(self.target(name))
 
     def test_unusable_runner_id_refused_before_writing(self):
-        for name in ("---", "\u65e5\u672c\u8a9e", "_x"):
+        for name in ("---", "\u65e5\u672c\u8a9e", "_x", 'a"b\\c'):
             with self.subTest(name=name):
-                code, out, err = self.new("claude", name="p", extra=["--name=" + name])
+                code, out, err = self.new("", name="p", extra=["--name=" + name, "--harness", "claude"])
                 self.assertEqual(code, 2)
-                self.assertIn("project id", err)
+                self.assertTrue("project id" in err or "cannot be written into harness files" in err, err)
                 self.assertFalse(os.path.exists(self.target("p")))
 
     def test_unusable_runner_id_ok_without_a_runner_stub(self):
@@ -1049,7 +1059,7 @@ class InstallerTest(unittest.TestCase):
         agents = tree["AGENTS.md"]
         self.assertIn("BEGIN module:plan-review slot:agents-guidance", agents)
         self.assertIn("BEGIN module:codex slot:agents-guidance", agents)
-        for phrase in ("have Codex review the plan", "/second-opinion", "ask-codex review-plan",
+        for phrase in ("have Codex review the plan", "ask-codex review-plan",
                        "3 rounds by default", "never more than 5", "applied or rejected",
                        "extend", "reset", "archive", "prune", "untracked", "OpenAI"):
             self.assertIn(phrase, agents)
@@ -1058,7 +1068,8 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("ask-codex archive", plan)
         self.assertLess(plan.index("module:plan-review slot:plan-review"),
                         plan.index("module:codex slot:plan-review"))
-        self.assertEqual(out.count("  codex: "), 1)
+        self.assertEqual(out.count("  codex: ask for"), 1)
+        self.assertIn("  codex: helper ask-codex:", out)
         self.assertEqual(out.count("  plan-review: "), 1)
 
     def test_codex_text_absent_without_the_module(self):
@@ -1078,10 +1089,28 @@ class InstallerTest(unittest.TestCase):
         for path in fresh:
             self.assertEqual(added[path], fresh[path], path)
 
-    def test_codex_is_a_harness_module_and_listed_that_way(self):
-        self.assertTrue(install.load_modules()["codex"]["harness"])
+    def test_codex_is_a_tool_module_and_listed_that_way(self):
         code, out, err = run(["--list"])
-        self.assertIn("codex (harness; requires plan-review)", out)
+        self.assertIn("codex (requires plan-review)", out)
+        self.assertNotIn("(harness", out)
+        meta = install.load_modules()["codex"]
+        self.assertEqual(meta["helpers"], ["ask-codex"])
+
+    def test_codex_guidance_names_no_harness_skill_or_slash_command(self):
+        for slot in ("agents-guidance", "plan-review"):
+            path = os.path.join(install.MODULES_DIR, "codex", "slots", slot + ".md")
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read()
+            for needle in ("claude", "Claude", "second-opinion", "/second", "skill", "remote-runner", "superpowers"):
+                self.assertNotIn(needle, text, (slot, needle))
+
+    def test_codex_ships_the_second_opinion_skill_for_claude_only(self):
+        self.assertEqual(self.new("codex")[0], 0)
+        self.assertFalse(os.path.exists(os.path.join(self.target(), ".claude")))
+        self.assertEqual(self.new("codex", name="h", extra=["--harness", "claude"])[0], 0)
+        self.assertTrue(os.path.isfile(os.path.join(self.target("h"), ".claude/skills/second-opinion/SKILL.md")))
 
     def test_interrupt_is_a_quiet_exit(self):
         def interrupted(args, out):
@@ -1097,7 +1126,8 @@ class InstallerTest(unittest.TestCase):
         code, out, err = run(["--list"])
         self.assertEqual(code, 0)
         self.assertIn("cad-freecad (requires cad)", out)
-        self.assertIn("claude (harness)", out)
+        self.assertNotIn("claude", out.split("\n", 1)[0])
+        self.assertNotIn("(harness", out)
 
 
 @unittest.skipUnless(os.name == "posix", "pseudo-terminal tests need POSIX")
@@ -1173,7 +1203,7 @@ class InteractivePromptTest(unittest.TestCase):
         self.assertFalse(os.path.exists(inside))
 
     def test_unusable_project_id_is_refused_before_identity_prompt(self):
-        code, out = self.run_install(["demo", "--with", "claude", "--name=---"], "")
+        code, out = self.run_install(["demo", "--with", "plan-review", "--harness", "claude", "--name=---"], "")
         self.assertEqual(code, 2, out)
         self.assertIn("project id", out)
         self.assertNotIn("Git user.name", out)
@@ -2511,7 +2541,7 @@ class UpdateTest(ProjectCase):
         self.assertIn("module:graphify slot:plan-discovery", self.read("docs/plans/next.md"))
 
     def test_add_skips_project_created_files(self):
-        self.new("claude")
+        self.new("plan-review")
         self.write("docs/plans/0001-old.md", self.OLD_PLAN)
         code, out, err = run(["--add", "graphify", "--dir", self.target()])
         self.assertEqual(code, 0, err)
@@ -2519,7 +2549,7 @@ class UpdateTest(ProjectCase):
         self.assertIn("module:graphify slot:plan-discovery", self.read("docs/plans/next.md"))
 
     def test_add_fails_when_only_a_project_created_file_has_the_marker(self):
-        self.new("claude")
+        self.new("plan-review")
         text = self.read("docs/plans/next.md")
         self.write("docs/plans/next.md",
                    text.replace("<!-- @module-slot: plan-discovery -->\n", ""))
@@ -2578,7 +2608,7 @@ class UpdateTest(ProjectCase):
         self.assertIn("kept docs/plans/next.md (per-plan file", out)
 
     def test_projects_grown_by_add_are_stable(self):
-        self.new("claude")
+        self.new("plan-review")
         for name in ("graphify", "cad", "cad-freecad", "formal"):
             self.assertEqual(run(["--add", name, "--dir", self.target()])[0], 0)
         before = tree_hash(self.target())
@@ -3198,16 +3228,16 @@ class RemoveTest(ProjectCase):
         return make_store(self.work, **kwargs)
 
     def test_remove_matches_a_project_created_without_the_module(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         code, out, err = self.remove("graphify")
         self.assertEqual(code, 0, err)
         _, tree = self.files()
-        self.assertEqual(tree, self.snapshot("claude"))
-        self.assertEqual(self.manifest()["modules"], ["claude"])
+        self.assertEqual(tree, self.snapshot("plan-review"))
+        self.assertEqual(self.manifest()["modules"], ["plan-review"])
         self.assertFalse(os.path.lexists(self.path(".graphifyignore")))
 
     def test_add_then_remove_restores_the_project(self):
-        self.assertEqual(self.new("claude")[0], 0)
+        self.assertEqual(self.new("")[0], 0)
         before = self.files()[1]
         self.assertEqual(run(["--add", "cad", "graphify", "--dir", self.target()])[0], 0)
         self.assertEqual(self.remove("cad", "graphify")[0], 0)
@@ -3215,21 +3245,21 @@ class RemoveTest(ProjectCase):
         self.assertFalse(os.path.lexists(self.path("docs/cad.md")))
 
     def test_empty_directories_are_pruned_but_not_others(self):
-        self.assertEqual(self.new("claude,cad")[0], 0)
-        self.assertEqual(self.remove("claude")[0], 0)
-        self.assertFalse(os.path.lexists(self.path(".claude")))
+        self.assertEqual(self.new("graphify,cad")[0], 0)
+        self.assertEqual(self.remove("graphify")[0], 0)
+        self.assertFalse(os.path.lexists(self.path("tools")))
         self.assertTrue(os.path.isdir(self.path("docs")))
         self.assertTrue(os.path.isdir(self.path(".git")))
 
     def test_edited_module_file_is_kept_and_reported(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         self.write(".graphifyignore", "mine\n")
         code, out, err = self.remove("graphify")
         self.assertEqual(code, 0, err)
         self.assertIn("kept .graphifyignore", out)
         self.assertEqual(self.read(".graphifyignore"), "mine\n")
         self.assertNotIn("module:graphify", self.read("AGENTS.md"))
-        self.assertEqual(self.manifest()["modules"], ["claude"])
+        self.assertEqual(self.manifest()["modules"], ["plan-review"])
 
     def test_dependent_module_blocks_removal(self):
         self.assertEqual(self.new("cad-freecad")[0], 0)
@@ -3240,19 +3270,19 @@ class RemoveTest(ProjectCase):
         self.assertEqual(tree_hash(self.target()), before)
 
     def test_naming_module_and_dependent_removes_both(self):
-        self.assertEqual(self.new("cad-freecad,claude")[0], 0)
+        self.assertEqual(self.new("cad-freecad,plan-review")[0], 0)
         self.assertEqual(self.remove("cad", "cad-freecad")[0], 0)
         _, tree = self.files()
-        self.assertEqual(tree, self.snapshot("claude"))
+        self.assertEqual(tree, self.snapshot("plan-review"))
 
     def test_removing_the_dependent_alone_keeps_the_module(self):
-        self.assertEqual(self.new("cad-freecad,claude")[0], 0)
+        self.assertEqual(self.new("cad-freecad,plan-review")[0], 0)
         self.assertEqual(self.remove("cad-freecad")[0], 0)
         _, tree = self.files()
-        self.assertEqual(tree, self.snapshot("cad,claude"))
+        self.assertEqual(tree, self.snapshot("cad,plan-review"))
 
     def test_not_installed_is_an_error(self):
-        self.assertEqual(self.new("claude")[0], 0)
+        self.assertEqual(self.new("plan-review")[0], 0)
         before = tree_hash(self.target())
         for name in ("graphify", "no-such", "kb=/tmp/x", "../x"):
             with self.subTest(name=name):
@@ -3262,7 +3292,7 @@ class RemoveTest(ProjectCase):
         self.assertEqual(tree_hash(self.target()), before)
 
     def test_malformed_markers_stop_the_run_with_nothing_written(self):
-        self.assertEqual(self.new("claude,graphify,formal")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify,formal")[0], 0)
         lines, begin, end = UpdateTest.block_lines(self, "AGENTS.md", "graphify", "agents-guidance")
         del lines[end]
         self.write("AGENTS.md", "\n".join(lines))
@@ -3273,7 +3303,7 @@ class RemoveTest(ProjectCase):
         self.assertEqual(tree_hash(self.target()), before)
 
     def test_unrelated_malformed_file_does_not_block_removal(self):
-        self.assertEqual(self.new("claude,graphify,plan-review")[0], 0)
+        self.assertEqual(self.new("formal,graphify,plan-review")[0], 0)
         rel = "docs/plans/README.md"
         lines, begin, end = UpdateTest.block_lines(self, rel, "plan-review", "plans-review-note")
         del lines[end]
@@ -3283,7 +3313,7 @@ class RemoveTest(ProjectCase):
         self.assertFalse(os.path.lexists(self.path(".graphifyignore")))
 
     def test_dry_run_writes_and_deletes_nothing(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         before = tree_hash(self.target())
         code, out, err = self.remove("graphify", extra=["--dry-run"])
         self.assertEqual(code, 0, err)
@@ -3293,7 +3323,7 @@ class RemoveTest(ProjectCase):
         self.assertEqual(tree_hash(self.target()), before)
 
     def test_conflicting_modes(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         before = tree_hash(self.target())
         for extra in (["--add", "cad"], ["--update"], ["--with", "cad"], ["--list"],
                       ["--register", self.work], ["--unregister", "x"], [self.work + "/other"]):
@@ -3313,7 +3343,7 @@ class RemoveTest(ProjectCase):
         self.assertIn(".template-manifest", err)
 
     def test_symlink_in_project_is_refused(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         os.symlink("AGENTS.md", self.path("link"))
         before = tree_hash(self.target())
         code, out, err = self.remove("graphify")
@@ -3321,7 +3351,7 @@ class RemoveTest(ProjectCase):
         self.assertEqual(tree_hash(self.target()), before)
 
     def test_parent_swapped_for_a_symlink_after_the_check_is_refused(self):
-        self.assertEqual(self.new("claude,cad")[0], 0)
+        self.assertEqual(self.new("plan-review,cad")[0], 0)
         outside = os.path.join(self.work, "outside")
         os.makedirs(outside)
         victim = os.path.join(outside, "cad.md")
@@ -3340,7 +3370,7 @@ class RemoveTest(ProjectCase):
         self.assertTrue(os.path.exists(victim))
 
     def test_without_safe_deletion_files_are_kept(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         saved = install.can_delete_safely
         install.can_delete_safely = lambda: False
         self.addCleanup(setattr, install, "can_delete_safely", saved)
@@ -3356,17 +3386,17 @@ class RemoveTest(ProjectCase):
         saved = install.MODULES_DIR
         install.MODULES_DIR = root
         self.addCleanup(setattr, install, "MODULES_DIR", saved)
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("graphify")[0], 0)
         shutil.rmtree(os.path.join(root, "graphify"))
         code, out, err = self.remove("graphify")
         self.assertEqual(code, 0, err)
         self.assertIn("no longer provided", out)
         self.assertTrue(os.path.exists(self.path(".graphifyignore")))
         self.assertNotIn("module:graphify", self.read("AGENTS.md"))
-        self.assertEqual(self.manifest()["modules"], ["claude"])
+        self.assertEqual(self.manifest()["modules"], [])
 
     def test_edited_block_stops_the_run_with_nothing_written(self):
-        self.assertEqual(self.new("claude,graphify,formal")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify,formal")[0], 0)
         lines, begin, end = UpdateTest.block_lines(self, "AGENTS.md", "graphify", "agents-guidance")
         edited = lines[:end] + ["my own note"] + lines[end:]
         moved = [lines[begin]] + lines[:begin] + lines[begin + 1:]
@@ -3380,7 +3410,7 @@ class RemoveTest(ProjectCase):
                 self.assertEqual(tree_hash(self.target()), before)
 
     def test_crlf_file_with_blocks_stops_the_run(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         with open(self.path("AGENTS.md"), "rb") as handle:
             data = handle.read()
         with open(self.path("AGENTS.md"), "wb") as handle:
@@ -3393,7 +3423,7 @@ class RemoveTest(ProjectCase):
         self.assertIn("graphify", self.manifest()["modules"])
 
     def test_skipped_entries_are_called_out(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         os.symlink("AGENTS.md", self.path("link"))
         code, out, err = self.remove("graphify", extra=["--skip-unsafe-entries"])
         self.assertEqual(code, 0, err)
@@ -3408,7 +3438,7 @@ class RemoveTest(ProjectCase):
         return root
 
     def test_module_claiming_a_base_file_does_not_delete_it(self):
-        self.assertEqual(self.new("claude,graphify")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify")[0], 0)
         root = self.modules_copy()
         with open(self.path("CONTRIBUTING.md"), "rb") as handle:
             data = handle.read()
@@ -3419,7 +3449,7 @@ class RemoveTest(ProjectCase):
         self.assertTrue(os.path.exists(self.path("CONTRIBUTING.md")))
 
     def test_file_shipped_by_two_removed_modules_is_deleted_once(self):
-        self.assertEqual(self.new("claude,graphify,formal")[0], 0)
+        self.assertEqual(self.new("plan-review,graphify,formal")[0], 0)
         root = self.modules_copy()
         for name in ("graphify", "formal"):
             os.makedirs(os.path.join(root, name, "files"), exist_ok=True)
@@ -3429,24 +3459,24 @@ class RemoveTest(ProjectCase):
         code, out, err = self.remove("graphify", "formal")
         self.assertEqual(code, 0, err)
         self.assertFalse(os.path.lexists(self.path("shared.txt")))
-        self.assertEqual(self.manifest()["modules"], ["claude"])
+        self.assertEqual(self.manifest()["modules"], ["plan-review"])
 
     # -- external modules -----------------------------------------------
 
     def test_external_module_is_removed_without_its_store(self):
         store = self.store()
-        self.assertEqual(self.new("claude,my_kb=" + store)[0], 0)
+        self.assertEqual(self.new("plan-review,my_kb=" + store)[0], 0)
         shutil.rmtree(store)
         code, out, err = self.remove("my_kb")
         self.assertEqual(code, 0, err)
         manifest = self.manifest()
-        self.assertEqual(manifest["modules"], ["claude"])
+        self.assertEqual(manifest["modules"], ["plan-review"])
         self.assertNotIn("external_modules", manifest)
         _, tree = self.files()
-        self.assertEqual(tree, self.snapshot("claude"))
+        self.assertEqual(tree, self.snapshot("plan-review"))
 
     def test_removal_keeps_other_external_entries(self):
-        self.assertEqual(self.new("claude,a=" + self.store(name="one") + ",b=" + self.store(name="two"))[0], 0)
+        self.assertEqual(self.new("plan-review,a=" + self.store(name="one") + ",b=" + self.store(name="two"))[0], 0)
         kept = self.manifest()["external_modules"]["b"]
         self.assertEqual(self.remove("a")[0], 0)
         manifest = self.manifest()
@@ -3455,15 +3485,15 @@ class RemoveTest(ProjectCase):
         self.assertIn("module:b ", self.read("AGENTS.md"))
 
     def test_builtin_and_external_removed_together(self):
-        self.assertEqual(self.new("claude,graphify,my_kb=" + self.store())[0], 0)
+        self.assertEqual(self.new("plan-review,graphify,my_kb=" + self.store())[0], 0)
         self.assertEqual(self.remove("graphify", "my_kb")[0], 0)
         _, tree = self.files()
-        self.assertEqual(tree, self.snapshot("claude"))
+        self.assertEqual(tree, self.snapshot("plan-review"))
 
     def test_registry_is_not_consulted_or_changed(self):
         store = self.store()
         self.assertEqual(run(["--register", store])[0], 0)
-        self.assertEqual(self.new("claude,my_kb")[0], 0)
+        self.assertEqual(self.new("plan-review,my_kb")[0], 0)
         registry = os.path.join(self.work, "xdg", "claude-project-template", "registry.json")
         with open(registry, "rb") as handle:
             before = handle.read()
@@ -4149,6 +4179,7 @@ class HarnessCase(ProjectCase):
     """Fixture built-in modules with harness directories (plan 0018)."""
 
     SKILL = "---\nname: x\ndescription: d\n---\nSkill body for REPLACE_WITH_PROJECT_NAME\n"
+    REAL_BASE_HARNESS = False  # the module tests expect only module files under --harness claude
 
     def setUp(self):
         super().setUp()
@@ -4157,12 +4188,29 @@ class HarnessCase(ProjectCase):
         saved = install.MODULES_DIR
         install.MODULES_DIR = self.mods
         self.addCleanup(setattr, install, "MODULES_DIR", saved)
+        if not self.REAL_BASE_HARNESS:
+            self.use_base(harness=False)
 
-    def module(self, name, harness=None, files=None, **meta):
+    def use_base(self, harness=True):
+        """Point the installer at a copy of base/, with or without its harness files."""
+        copy = os.path.join(self.work, "base-copy-%d" % len(os.listdir(self.work)))
+        shutil.copytree(install.BASE_DIR, copy)
+        if not harness:
+            shutil.rmtree(os.path.join(copy, "harness"), ignore_errors=True)
+        saved = install.BASE_DIR
+        install.BASE_DIR = copy
+        self.addCleanup(setattr, install, "BASE_DIR", saved)
+        return copy
+
+    def module(self, name, harness=None, files=None, slots=None, **meta):
         base = os.path.join(self.mods, name)
         os.makedirs(base, exist_ok=True)
         with open(os.path.join(base, "module.json"), "w") as handle:
             json.dump(dict({"description": name}, **meta), handle)
+        for slot, text in (slots or {}).items():
+            os.makedirs(os.path.join(base, "slots"), exist_ok=True)
+            with open(os.path.join(base, "slots", slot + ".md"), "w") as handle:
+                handle.write(text)
         for kind, tree in (("harness/claude", harness or {}), ("files", files or {})):
             for rel, text in tree.items():
                 full = os.path.join(base, *kind.split("/"), *rel.split("/"))
@@ -5095,6 +5143,514 @@ class HelperTest(unittest.TestCase):
         self.assertFalse(install.find_helper("tool"))
 
 
+def module_record(record):
+    """The harness_files entries supplied by modules, without the template's own `base` files."""
+    return sorted(path for path, entry in record.items() if entry["modules"] != ["base"])
+
+
+class BaseHarnessTest(HarnessCase):
+    """Plan 0023 increment B: base harness files supplied by the reserved name `base`."""
+
+    REAL_BASE_HARNESS = True
+    CLAUDE_MD = "# Claude-specific project guidance\n\n@AGENTS.md\n"
+
+    def demo(self):
+        self.module("demo", harness={
+            "skills/x/SKILL.md": self.SKILL,
+            "agents/a.md": "---\nname: agent-a\n---\nagent\n",
+            "commands/c.md": "command\n",
+        })
+
+    def test_base_tree_excludes_the_harness_directory(self):
+        tree = install.base_tree()
+        self.assertTrue(tree)
+        self.assertFalse([p for p in tree if p.split("/")[0] == "harness"])
+        self.assertTrue([p for p in install.collect_tree(install.BASE_DIR) if p.startswith("harness/")])
+
+    def test_new_installs_the_base_files_for_the_harness(self):
+        self.demo()
+        code, out, err = self.new_h("demo", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("CLAUDE.md"), self.CLAUDE_MD)
+        self.assertIn('id = "proj"', self.read(".claude/remote-runner.toml"))
+        self.assertFalse(os.path.exists(self.path("harness")))
+        record = self.manifest()["harness_files"]
+        self.assertEqual(record["CLAUDE.md"]["modules"], ["base"])
+        self.assertEqual(record[".claude/remote-runner.toml"]["modules"], ["base"])
+        self.assertEqual(record[".claude/agents/a.md"]["modules"], ["demo"])
+
+    def test_no_harness_means_no_base_files(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo")[0], 0)
+        self.assertFalse(os.path.exists(self.path("CLAUDE.md")))
+        self.assertFalse(os.path.exists(self.path(".claude")))
+
+    def test_a_harness_with_no_modules_still_gets_the_base_files(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), [".claude/remote-runner.toml", "CLAUDE.md"])
+
+    def test_the_base_files_are_not_reported_as_a_module_without_files(self):
+        self.module("plain")
+        out = self.new_h("plain", "--harness", "claude")[1]
+        self.assertNotIn("base: no claude files", out)
+
+    def test_activation_installs_them_once(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        code, out, err = self.add("plain", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("CLAUDE.md"), self.CLAUDE_MD)
+        again = self.add("plain", extra=["--harness", "claude"])
+        self.assertEqual(again[0], 0)
+        self.assertNotIn("conflict", again[1])
+
+    def test_an_identical_existing_file_is_adopted_for_base(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        self.write("CLAUDE.md", self.CLAUDE_MD)
+        code, out, err = self.add("plain", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("conflict CLAUDE.md", out)
+        self.assertEqual(self.manifest()["harness_files"]["CLAUDE.md"]["modules"], ["base"])
+
+    def test_update_replaces_an_unedited_base_file_and_keeps_an_edit(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        copy = self.use_base()
+        with open(os.path.join(copy, "harness", "claude", "root", "CLAUDE.md"), "w") as handle:
+            handle.write("# New entry point\n")
+        self.write(".claude/remote-runner.toml", "# mine\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("CLAUDE.md"), "# New entry point\n")
+        self.assertEqual(self.read(".claude/remote-runner.toml"), "# mine\n")
+        self.assertIn("conflict .claude/remote-runner.toml", out)
+
+    def test_a_named_update_does_not_touch_the_base_files(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        copy = self.use_base()
+        with open(os.path.join(copy, "harness", "claude", "root", "CLAUDE.md"), "w") as handle:
+            handle.write("# New entry point\n")
+        self.assertEqual(self.update("plain")[0], 0)
+        self.assertEqual(self.read("CLAUDE.md"), self.CLAUDE_MD)
+
+    def test_remove_never_deletes_or_unrecords_a_base_path(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        code, out, err = self.remove_demo()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("CLAUDE.md"), self.CLAUDE_MD)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), [".claude/remote-runner.toml", "CLAUDE.md"])
+
+    def remove_demo(self):
+        return run(["--remove", "demo", "--dir", self.target()])
+
+    def test_a_co_supplied_base_path_stays_when_the_module_goes(self):
+        self.module("twin", harness={"root/CLAUDE.md": self.CLAUDE_MD})
+        code, out, err = self.new_h("twin", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.manifest()["harness_files"]["CLAUDE.md"]["modules"], ["base", "twin"])
+        self.assertEqual(run(["--remove", "twin", "--dir", self.target()])[0], 0)
+        self.assertEqual(self.manifest()["harness_files"]["CLAUDE.md"]["modules"], ["base"])
+        self.assertTrue(os.path.exists(self.path("CLAUDE.md")))
+
+    def test_a_module_cannot_supply_a_different_base_path(self):
+        self.module("clash", harness={"root/CLAUDE.md": "# different\n"})
+        code, out, err = self.new_h("clash", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn("CLAUDE.md", err)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_a_base_harness_path_equal_to_a_module_file_is_refused(self):
+        self.module("owner", files={"CLAUDE.md": "mine\n"})
+        code, out, err = self.new_h("owner", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_the_base_directory_follows_the_harness_tree_rules(self):
+        for rel, data in (("harness/claude/settings.json", "{}"), ("harness/claude/harness.json", '{"roles": {}}'),
+                          ("harness/claude/hooks/x.sh", "x"), ("harness/claude/root/AGENTS.md", "x")):
+            with self.subTest(rel=rel):
+                copy = self.use_base()
+                full = os.path.join(copy, *rel.split("/"))
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as handle:
+                    handle.write(data)
+                self.module("plain")
+                code, out, err = self.new_h("plain", "--harness", "claude")
+                self.assertEqual(code, 2, err)
+                self.assertFalse(os.path.exists(self.target()))
+
+    def test_the_name_base_is_reserved(self):
+        self.module("base")
+        code, out, err = run(["--list"])
+        self.assertEqual(code, 2)
+        self.assertIn("base", err)
+
+    def test_a_record_naming_base_loads_and_an_unknown_supplier_does_not(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        record = self.manifest()["harness_files"]
+        record["CLAUDE.md"]["modules"] = ["ghost"]
+        self.set_manifest(harness_files=record)
+        self.assertEqual(self.update()[0], 2)
+        record["CLAUDE.md"]["modules"] = ["base"]
+        self.set_manifest(harness_files=record)
+        self.assertEqual(self.update()[0], 0)
+
+
+class HarnessIgnoreBlockTest(HarnessCase):
+    """Plan 0023 increment C: the harness's own ignore block in .gitignore."""
+
+    REAL_BASE_HARNESS = True
+    BEGIN = "# BEGIN harness:claude"
+    END = "# END harness:claude"
+    LINE = "/.claude/settings.local.json"
+
+    def block_count(self):
+        return self.read(".gitignore").split("\n").count(self.BEGIN)
+
+    def test_new_adds_one_block_at_the_end(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        text = self.read(".gitignore")
+        self.assertTrue(text.endswith("%s\n%s\n%s\n" % (self.BEGIN, self.LINE, self.END)), text[-120:])
+        self.assertEqual(self.block_count(), 1)
+        self.assertEqual(text.count(self.LINE), 1)
+
+    def test_no_harness_no_block(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        self.assertNotIn("harness:claude", self.read(".gitignore"))
+
+    def test_activation_adds_it_once_and_a_rerun_changes_nothing(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        self.assertEqual(self.add("plain", extra=["--harness", "claude"])[0], 0)
+        first = self.read(".gitignore")
+        self.assertEqual(self.block_count(), 1)
+        self.assertEqual(self.add("plain", extra=["--harness", "claude"])[0], 0)
+        self.assertEqual(self.read(".gitignore"), first)
+
+    def test_update_restores_an_edited_block_and_leaves_other_text_alone(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        text = self.read(".gitignore")
+        self.write(".gitignore", "# mine\n" + text.replace(self.LINE, "/something/else"))
+        self.assertEqual(self.update()[0], 0)
+        updated = self.read(".gitignore")
+        self.assertTrue(updated.startswith("# mine\n"))
+        self.assertIn(self.LINE, updated)
+        self.assertNotIn("/something/else", updated)
+        self.assertEqual(self.update()[1].count("harness:claude"), 0)
+
+    def test_a_named_update_leaves_the_block_alone(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        text = self.read(".gitignore").replace(self.LINE, "/changed")
+        self.write(".gitignore", text)
+        self.assertEqual(self.update("plain")[0], 0)
+        self.assertEqual(self.read(".gitignore"), text)
+
+    def test_inexact_or_duplicated_markers_leave_the_file_alone_with_a_note(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        base = self.read(".gitignore")
+        for label, text in (("only a begin", base.replace(self.END, "")),
+                            ("duplicated", base + "\n" + self.BEGIN + "\n" + self.LINE + "\n" + self.END + "\n"),
+                            ("crlf", base.replace("\n", "\r\n")), ("reversed", self.END + "\n" + self.BEGIN + "\n")):
+            with self.subTest(label=label):
+                with open(self.path(".gitignore"), "w", newline="") as handle:
+                    handle.write(text)
+                code, out, err = self.update()
+                self.assertEqual(code, 0, err)
+                with open(self.path(".gitignore"), newline="") as handle:
+                    self.assertEqual(handle.read(), text)
+                self.assertIn(".gitignore", out)
+
+    def test_a_symlinked_gitignore_is_refused_before_any_write(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        os.unlink(self.path(".gitignore"))
+        outside = os.path.join(self.work, "outside-ignore")
+        with open(outside, "w") as handle:
+            handle.write("PRECIOUS\n")
+        os.symlink(outside, self.path(".gitignore"))
+        before = self.read(".template-manifest")
+        code, out, err = self.add("plain", extra=["--harness", "claude"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read(".template-manifest"), before)
+        self.assertFalse(os.path.exists(self.path("CLAUDE.md")))
+        with open(outside) as handle:
+            self.assertEqual(handle.read(), "PRECIOUS\n")
+
+    def test_a_missing_gitignore_is_created(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        os.unlink(self.path(".gitignore"))
+        self.assertEqual(self.add("plain", extra=["--harness", "claude"])[0], 0)
+        self.assertEqual(self.read(".gitignore"), "%s\n%s\n%s\n" % (self.BEGIN, self.LINE, self.END))
+
+    def test_dry_run_lists_the_file_and_writes_nothing(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        before = self.read(".gitignore")
+        code, out, err = self.add("plain", extra=["--harness", "claude", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("would write .gitignore", out)
+        self.assertEqual(self.read(".gitignore"), before)
+
+    def test_module_blocks_and_the_harness_block_coexist(self):
+        self.module("sloty", slots={"gitignore": "/sloty-output\n"})
+        self.assertEqual(self.new_h("sloty", "--harness", "claude")[0], 0)
+        text = self.read(".gitignore")
+        self.assertIn("BEGIN module:sloty slot:gitignore", text)
+        self.assertEqual(self.block_count(), 1)
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(run(["--remove", "sloty", "--dir", self.target()])[0], 0)
+        text = self.read(".gitignore")
+        self.assertNotIn("module:sloty", text)
+        self.assertEqual(self.block_count(), 1)
+
+    def test_the_block_is_not_written_to_git_metadata(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        with open(self.path(".git/info/exclude")) as handle:
+            self.assertNotIn("harness:claude", handle.read())
+
+
+class RetiredModuleTest(ProjectCase):
+    """Plan 0023 increment D: the claude module is retired in favour of --harness claude."""
+
+    OLD = "b1af3e9"
+
+    def new_with(self, with_, *extra):
+        return run([self.target(), "--with", with_, "--git-name", "Test User",
+                    "--git-email", "tester@users.noreply.example.invalid", *extra])
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def test_with_claude_acts_as_the_harness_and_says_so(self):
+        code, out, err = self.new_with("claude,graphify")
+        self.assertEqual(code, 0, err)
+        self.assertIn("claude is retired as a module; --harness claude was used instead", out)
+        manifest = self.manifest()
+        self.assertNotIn("claude", manifest["modules"])
+        self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
+        self.assertTrue(os.path.isfile(self.path("CLAUDE.md")))
+        self.assertTrue(os.path.isfile(self.path(".claude/remote-runner.toml")))
+        self.assertTrue(os.path.isfile(self.path(".claude/skills/graphify-workflow/SKILL.md")))
+
+    def test_with_claude_and_the_option_together_is_fine(self):
+        code, out, err = self.new_with("claude", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.manifest()["harness"], "claude")
+
+    def test_with_claude_beside_another_harness_is_refused_before_any_write(self):
+        code, out, err = self.new_with("claude", "--harness", "opencode")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_add_claude_activates_the_harness(self):
+        self.assertEqual(self.new_with("graphify")[0], 0)
+        code, out, err = run(["--add", "claude", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertIn("claude is retired as a module", out)
+        self.assertEqual(self.manifest()["harness"], "claude")
+        self.assertTrue(os.path.isfile(self.path("CLAUDE.md")))
+
+    def test_list_shows_no_claude_and_no_harness_mark(self):
+        code, out, err = run(["--list"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("claude", out.split("Registered stores")[0].lower().replace("claude-", ""))
+        self.assertNotIn("(harness", out)
+
+    def test_remove_claude_is_refused_and_writes_nothing(self):
+        self.assertEqual(self.new_with("graphify", "--harness", "claude")[0], 0)
+        before = self.read(".template-manifest")
+        code, out, err = run(["--remove", "claude", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertIn("--harness claude", err)
+        self.assertEqual(self.read(".template-manifest"), before)
+
+    def test_a_store_cannot_be_named_after_a_retired_module(self):
+        store = make_store(self.work, name="claude_kb")
+        code, out, err = self.new_with("claude=" + store)
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_a_harness_key_in_a_built_in_module_json_is_refused(self):
+        root = os.path.join(self.work, "flagged")
+        os.makedirs(os.path.join(root, "old"))
+        with open(os.path.join(root, "old", "module.json"), "w") as handle:
+            json.dump({"description": "old", "harness": True}, handle)
+        with self.assertRaises(install.InstallError) as ctx:
+            install.load_modules(root)
+        self.assertIn("harness/<name>/", str(ctx.exception))
+
+    def old_template(self):
+        probe = subprocess.run(["git", "-C", ROOT, "cat-file", "-e", self.OLD + ":install.py"], capture_output=True)
+        if probe.returncode:
+            self.skipTest("the pre-retirement commit is not in this checkout")
+        old = os.path.join(self.work, "old-template")
+        os.makedirs(old)
+        archive = subprocess.run(["git", "-C", ROOT, "archive", self.OLD, "base", "modules", "install.py"],
+                                 capture_output=True, check=True).stdout
+        subprocess.run(["tar", "-x", "-C", old], input=archive, check=True)
+        return old
+
+    def old_project(self, with_):
+        old = self.old_template()
+        result = subprocess.run([sys.executable, "-I", os.path.join(old, "install.py"), self.target(),
+                                 "--with", with_, "--git-name", "T", "--git-email", "t@users.noreply.example.invalid"],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return old
+
+    def test_update_migrates_a_project_created_with_the_claude_module(self):
+        self.old_project("claude,codex,graphify")
+        self.assertIn("claude", self.manifest()["modules"])
+        self.assertIn("BEGIN module:claude slot:gitignore", self.read(".gitignore"))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        manifest = self.manifest()
+        self.assertEqual(manifest["modules"], ["codex", "graphify", "plan-review"])
+        self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
+        self.assertEqual(manifest["harness_files"]["CLAUDE.md"]["modules"], ["base"])
+        self.assertEqual(manifest["harness_files"][".claude/remote-runner.toml"]["modules"], ["base"])
+        self.assertNotIn("claude", manifest.get("module_commits", {}))
+        text = self.read(".gitignore")
+        self.assertNotIn("module:claude", text)
+        self.assertEqual(text.count("# BEGIN harness:claude"), 1)
+        self.assertIn("/.claude/settings.local.json", text)
+        self.assertNotIn("conflict", out)
+        again = self.update()
+        self.assertEqual(again[0], 0, again[2])
+        self.assertIn("Nothing to update", again[1])
+        self.assertEqual(self.manifest(), manifest)
+
+    def test_the_migrated_project_matches_a_fresh_one(self):
+        self.old_project("claude,codex")
+        self.assertEqual(self.update()[0], 0)
+        migrated = {k: v for k, v in self.manifest()["harness_files"].items()}
+        fresh = os.path.join(self.work, "fresh")
+        self.assertEqual(run([fresh, "--with", "codex", "--harness", "claude", "--name", "proj",
+                              "--git-name", "T", "--git-email", "t@users.noreply.example.invalid"])[0], 0)
+        with open(os.path.join(fresh, ".template-manifest")) as handle:
+            expected = json.load(handle)["harness_files"]
+        self.assertEqual(sorted(migrated), sorted(expected))
+        for path in ("CLAUDE.md", ".claude/remote-runner.toml"):
+            self.assertEqual(migrated[path]["sha256"], expected[path]["sha256"])
+
+    def test_migration_keeps_an_edited_file_and_an_edited_old_block(self):
+        self.old_project("claude")
+        self.write("CLAUDE.md", "# mine\n")
+        text = self.read(".gitignore").replace("/.claude/settings.local.json", "/.claude/settings.local.json\n# mine")
+        self.write(".gitignore", text)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("CLAUDE.md"), "# mine\n")
+        self.assertIn("conflict CLAUDE.md", out)
+        self.assertNotIn("CLAUDE.md", self.manifest()["harness_files"])
+        self.assertIn("module:claude", self.read(".gitignore"))
+        self.assertEqual(self.read(".gitignore").count("# BEGIN harness:claude"), 1)
+        self.assertIn(".gitignore", out)
+
+    def test_a_named_update_does_not_migrate(self):
+        self.old_project("claude,graphify")
+        code, out, err = self.update("graphify")
+        self.assertEqual(code, 0, err)
+        self.assertIn("claude", self.manifest()["modules"])
+        self.assertNotIn("harness", self.manifest())
+        self.assertIn("full --update", out)
+
+    def test_migration_is_refused_when_another_harness_is_recorded(self):
+        self.old_project("claude")
+        manifest = self.manifest()
+        manifest.update(schema=2, harness="opencode", harness_files={})
+        saved = dict(install.HARNESSES)
+        install.HARNESSES["opencode"] = dict(install.HARNESSES["claude"], root=".opencode")
+        self.addCleanup(lambda: (install.HARNESSES.clear(), install.HARNESSES.update(saved)))
+        self.write(".template-manifest", json.dumps(manifest))
+        before = self.read(".template-manifest")
+        code, out, err = self.update()
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read(".template-manifest"), before)
+
+    def test_a_forged_manifest_listing_claude_cannot_reach_other_paths(self):
+        self.old_project("graphify")
+        victim = self.path("docs/keep.md")
+        os.makedirs(os.path.dirname(victim), exist_ok=True)
+        self.write("docs/keep.md", "keep\n")
+        manifest = self.manifest()
+        manifest["modules"] = sorted(manifest["modules"] + ["claude"])
+        manifest["file_bases"] = {"docs/keep.md": None, "../outside": None}
+        manifest["module_info"] = {"claude": {"type": "x"}}
+        self.write(".template-manifest", json.dumps(manifest))
+        code, out, err = self.update()
+        self.assertEqual(code, 2, out)
+        manifest["file_bases"] = {"docs/keep.md": None}
+        self.write(".template-manifest", json.dumps(manifest))
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read("docs/keep.md"), "keep\n")
+        self.assertNotIn("claude", self.manifest()["modules"])
+        self.assertNotIn("claude", self.manifest().get("module_info", {}))
+
+
+class ReviewFindingsTest(HarnessCase):
+    """Plan 0023 security review: forged `base`, a non-UTF-8 .gitignore, a retired module under a named command."""
+
+    REAL_BASE_HARNESS = True
+
+    def test_a_forged_manifest_cannot_remove_the_base_supplier(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        manifest = self.manifest()
+        manifest["modules"] = sorted(manifest["modules"] + ["base"])
+        self.set_manifest(modules=manifest["modules"])
+        before = self.read("CLAUDE.md")
+        code, out, err = run(["--remove", "base", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read("CLAUDE.md"), before)
+        self.assertTrue(os.path.exists(self.path(".claude/remote-runner.toml")))
+
+    def test_a_non_utf8_gitignore_is_left_alone_with_a_note(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        with open(self.path(".gitignore"), "wb") as handle:
+            handle.write(b"\xff\xfe\x00bad\n")
+        code, out, err = self.add("plain", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        with open(self.path(".gitignore"), "rb") as handle:
+            self.assertEqual(handle.read(), b"\xff\xfe\x00bad\n")
+        self.assertIn(".gitignore", out)
+        self.assertTrue(os.path.exists(self.path("CLAUDE.md")))
+
+    def test_a_non_utf8_gitignore_does_not_break_update(self):
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        with open(self.path(".gitignore"), "wb") as handle:
+            handle.write(b"\xff\xfe\x00bad\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        with open(self.path(".gitignore"), "rb") as handle:
+            self.assertEqual(handle.read(), b"\xff\xfe\x00bad\n")
+
+
+class RetiredAddHintTest(RetiredModuleTest):
+    def test_a_named_add_on_an_unmigrated_project_says_to_update_first(self):
+        self.old_project("claude")
+        before = self.read(".template-manifest")
+        code, out, err = run(["--add", "graphify", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertIn("full --update", err)
+        self.assertEqual(self.read(".template-manifest"), before)
+
+
 class HarnessPilotTest(ProjectCase):
     """Plan 0019: the real cad-freecad module ships the freecad-scripts skill."""
 
@@ -5144,9 +5700,10 @@ class HarnessPilotTest(ProjectCase):
             self.assertTrue(os.path.isfile(self.path(rel)), rel)
         manifest = self.manifest()
         self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
-        self.assertEqual(sorted(manifest["harness_files"]), self.files_expected())
-        for entry in manifest["harness_files"].values():
-            self.assertEqual(entry["modules"], ["cad-freecad"])
+        self.assertEqual(module_record(manifest["harness_files"]), self.files_expected())
+        for path, entry in manifest["harness_files"].items():
+            if path not in ("CLAUDE.md", ".claude/remote-runner.toml"):
+                self.assertEqual(entry["modules"], ["cad-freecad"])
         self.assertEqual(os.stat(self.path(self.SKILL + "/scripts/mesh_report.py")).st_mode & 0o111, 0)
         self.assertNotIn("Unresolved placeholders:\n  .claude", out)
 
@@ -5171,7 +5728,7 @@ class HarnessPilotTest(ProjectCase):
         self.assertEqual(self.new_pilot("cad-freecad")[0], 0)
         code, out, err = run(["--add", "plan-review", "--harness", "claude", "--dir", self.target()])
         self.assertEqual(code, 0, err)
-        self.assertEqual(sorted(self.manifest()["harness_files"]), self.files_expected())
+        self.assertEqual(module_record(self.manifest()["harness_files"]), self.files_expected())
 
     def test_update_leaves_an_unedited_tree_alone_and_keeps_an_edit(self):
         self.assertEqual(self.new_pilot("cad-freecad", "--harness", "claude")[0], 0)
@@ -5193,7 +5750,7 @@ class HarnessPilotTest(ProjectCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(os.listdir(self.path(self.SKILL)), ["references"])
         self.assertEqual(os.listdir(self.path(self.SKILL + "/references")), ["images-to-cad.md"])
-        self.assertEqual(self.manifest()["harness_files"], {})
+        self.assertEqual(module_record(self.manifest()["harness_files"]), [])
         self.write(kept, "")
         os.unlink(self.path(kept))
         self.assertEqual(self.new_pilot("cad-freecad", "--harness", "claude")[0], 2)  # target exists
@@ -5201,7 +5758,7 @@ class HarnessPilotTest(ProjectCase):
     def test_remove_with_no_edits_leaves_no_skill_directory(self):
         self.assertEqual(self.new_pilot("cad-freecad", "--harness", "claude")[0], 0)
         self.assertEqual(run(["--remove", "cad-freecad", "--dir", self.target()])[0], 0)
-        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertFalse(os.path.exists(self.path(self.SKILL)))
 
     def test_the_script_is_not_stored_executable(self):
         meta = install.load_modules()["cad-freecad"]
@@ -5573,7 +6130,7 @@ class GraphifyHarnessTest(ProjectCase):
         self.assertEqual(code, 0, err)
         for rel in self.files_expected():
             self.assertTrue(os.path.isfile(self.path(rel)), rel)
-        self.assertEqual(sorted(self.manifest()["harness_files"]), self.files_expected())
+        self.assertEqual(module_record(self.manifest()["harness_files"]), self.files_expected())
         lines = [line.strip() for line in out.splitlines()]
         self.assertIn("graphify: helper graphify: present", lines)
         self.assertIn("graphify: worker %s: implemented by graphify" % self.ROLE, lines)
@@ -5606,13 +6163,14 @@ class GraphifyHarnessTest(ProjectCase):
         code, out, err = run(["--add", "graphify", "--harness", "claude", "--global-config", self.cfg,
                               "--dir", self.target()])
         self.assertEqual(code, 0, err)
-        self.assertEqual(sorted(self.manifest()["harness_files"]), self.files_expected())
+        self.assertEqual(module_record(self.manifest()["harness_files"]), self.files_expected())
 
     def test_remove_deletes_the_unedited_harness_files(self):
         self.assertEqual(self.new_graphify("--harness", "claude")[0], 0)
         code, out, err = run(["--remove", "graphify", "--dir", self.target()])
         self.assertEqual(code, 0, err)
-        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertFalse(os.path.exists(self.path(self.SKILL)))
+        self.assertFalse(os.path.exists(self.path(self.AGENT)))
         self.assertFalse(os.path.exists(self.path("tools/graphify/workflow.py")))
 
 
@@ -5651,9 +6209,10 @@ class HarnessFormalTest(ProjectCase):
             self.assertTrue(os.path.isfile(self.path(rel)), rel)
         manifest = self.manifest()
         self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
-        self.assertEqual(sorted(manifest["harness_files"]), sorted(self.FILES))
-        for entry in manifest["harness_files"].values():
-            self.assertEqual(entry["modules"], ["formal"])
+        self.assertEqual(module_record(manifest["harness_files"]), sorted(self.FILES))
+        for path, entry in manifest["harness_files"].items():
+            if path not in ("CLAUDE.md", ".claude/remote-runner.toml"):
+                self.assertEqual(entry["modules"], ["formal"])
 
     def test_new_without_the_harness_installs_nothing_extra(self):
         self.assertEqual(self.new_formal("formal")[0], 0)
@@ -5665,7 +6224,7 @@ class HarnessFormalTest(ProjectCase):
         self.assertEqual(self.new_formal("cad")[0], 0)
         code, out, err = run(["--add", "formal", "--harness", "claude", "--dir", self.target()])
         self.assertEqual(code, 0, err)
-        self.assertEqual(sorted(self.manifest()["harness_files"]), sorted(self.FILES))
+        self.assertEqual(module_record(self.manifest()["harness_files"]), sorted(self.FILES))
         shutil.rmtree(self.target())
         self.assertEqual(self.new_formal("cad")[0], 0)
         self.assertEqual(run(["--add", "formal", "--dir", self.target()])[0], 0)
@@ -5674,12 +6233,12 @@ class HarnessFormalTest(ProjectCase):
         shutil.rmtree(self.target())
         self.assertEqual(self.new_formal("cad", "--harness", "claude")[0], 0)
         self.assertEqual(run(["--add", "formal", "--dir", self.target()])[0], 0)
-        self.assertEqual(sorted(self.manifest()["harness_files"]), sorted(self.FILES))
+        self.assertEqual(module_record(self.manifest()["harness_files"]), sorted(self.FILES))
         shutil.rmtree(self.target())
         self.assertEqual(self.new_formal("formal")[0], 0)
         code, out, err = run(["--add", "formal", "--harness", "claude", "--dir", self.target()])
         self.assertEqual(code, 0, err)
-        self.assertEqual(sorted(self.manifest()["harness_files"]), sorted(self.FILES))
+        self.assertEqual(module_record(self.manifest()["harness_files"]), sorted(self.FILES))
 
     def test_update_leaves_an_unedited_tree_alone_and_keeps_an_edit(self):
         self.assertEqual(self.new_formal("formal", "--harness", "claude")[0], 0)
@@ -5698,12 +6257,12 @@ class HarnessFormalTest(ProjectCase):
         code, out, err = run(["--remove", "formal", "--dir", self.target()])
         self.assertEqual(code, 0, err)
         self.assertEqual(os.listdir(self.path(self.SKILL)), ["reference.md"])
-        self.assertEqual(self.manifest()["harness_files"], {})
+        self.assertEqual(module_record(self.manifest()["harness_files"]), [])
 
     def test_remove_with_no_edits_leaves_no_skill_directory(self):
         self.assertEqual(self.new_formal("formal", "--harness", "claude")[0], 0)
         self.assertEqual(run(["--remove", "formal", "--dir", self.target()])[0], 0)
-        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertFalse(os.path.exists(self.path(self.SKILL)))
 
     def test_the_hint_points_at_the_option(self):
         code, out, err = self.new_formal("formal")
