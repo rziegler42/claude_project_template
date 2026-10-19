@@ -46,7 +46,7 @@ and the approval. ADR 0004 is accepted with it.
 **Boundary:** documents only; no installer change.
 **Promotion trigger:** the owner accepts the direction of ADR 0004. Met.
 
-### 2. Harness directories and `--harness`
+### 2. Harness directories and `--harness` (done 2026-10-19, plan 0018)
 
 **Outcome:** the installer copies `harness/<name>/` into the harness root, records `harness` in the
 manifest, refuses a different value and never overwrites an existing file; `--update` and `--remove`
@@ -65,7 +65,7 @@ configuration drops it. It needs no helper, so it proves the mechanism alone. Sp
 repositories as two plans.
 **Dependencies:** 2.
 **Boundary:** one module and one skill.
-**Promotion trigger:** candidate 2 complete.
+**Promotion trigger:** candidate 2 complete. Met.
 
 ### 4. Declarations and reporting
 
