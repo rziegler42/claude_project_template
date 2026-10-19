@@ -47,7 +47,8 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 EXT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}\Z")
 DESCRIPTOR_DIR = "template-module"
-MODULE_FORMATS = (1, 2)
+MODULE_FORMATS = (1, 2, 3)
+DECLARATION_KEYS = ("helpers", "workers", "global_config")
 EXTERNAL_ORDER = 1000000
 DESCRIPTION_MAX = 200
 FRAGMENT_MAX_BYTES = 64 * 1024
@@ -368,6 +369,8 @@ def read_external(name, value, target, builtin):
     allowed = {"module_format", "description", "hint"}
     if fmt >= 2:
         allowed |= set(INFO_KEYS)
+    if fmt >= 3:
+        allowed |= set(DECLARATION_KEYS)
     unknown = set(meta) - allowed
     if unknown:
         raise InstallError("module %s: unknown module.json keys: %s" % (name, len(unknown)))
@@ -383,6 +386,15 @@ def read_external(name, value, target, builtin):
                 "module %s: %s must be a single printable line of 1-%d characters"
                 % (name, key, DESCRIPTION_MAX)
             )
+    declared = {"helpers": [], "workers": {}, "global_config": False}
+    declared.update({k: meta[k] for k in DECLARATION_KEYS if k in meta})
+    problem = declarations_problem(declared)
+    if problem:
+        raise InstallError("module %s: %s" % (name, problem))
+    harness_top = os.path.join(descriptor, "harness")
+    has_harness = os.path.lexists(harness_top)
+    if has_harness and fmt < 3:
+        raise InstallError("module %s: harness/ needs module_format 3" % name)
     entries = os.listdir(slot_dir)
     if len(entries) > FRAGMENT_MAX_COUNT:
         raise InstallError("module %s: more than %d fragments" % (name, FRAGMENT_MAX_COUNT))
@@ -409,13 +421,27 @@ def read_external(name, value, target, builtin):
         if any(mark in text for mark in FRAGMENT_FORBIDDEN):
             raise InstallError("module %s: fragment %s contains a reserved marker" % (name, slot))
         slots[slot] = text
-    digest = descriptor_digest(
-        [("module.json", raw)] + [("slots/%s.md" % s, raw_slots[s]) for s in sorted(raw_slots)]
-    )
+    files = [("module.json", raw)] + [("slots/%s.md" % s, raw_slots[s]) for s in sorted(raw_slots)]
+    harness_trees = {}
+    if has_harness:
+        check_harness_dirs({"name": name, "path": descriptor})
+        reserved = reserved_paths(load_modules(), builtin)
+        budget = RunBudget()
+        harness_files = []
+        for harness in sorted(HARNESSES):
+            sources = {}
+            installed, units = read_harness_tree({"name": name, "path": descriptor}, harness, reserved,
+                                                 budget, strict=True, raw=sources)
+            if os.path.lexists(os.path.join(harness_top, harness)):
+                harness_trees[harness] = {"files": installed, "units": units, "sources": sources}
+                harness_files += [("harness/%s/%s" % (harness, rel), data) for rel, data in sources.items()]
+        files += sorted(harness_files, key=lambda item: item[0].encode("utf-8"))
+    digest = descriptor_digest(files)
     module = {
         "name": name, "path": store, "external": True, "description": meta["description"],
         "hint": meta.get("hint"), "module_format": fmt, "digest": digest, "requires": [],
-        "order": EXTERNAL_ORDER, "slots": slots,
+        "order": EXTERNAL_ORDER, "slots": slots, "has_harness": has_harness,
+        "harness_trees": harness_trees, **declared,
     }
     module.update({k: meta[k] for k in INFO_KEYS if k in meta})
     module["store"] = where
@@ -445,12 +471,19 @@ def load_externals(entries, target, builtin, registered=()):
     return loaded
 
 
+APPROVALS_SUFFIX = ".approvals"
+
+
 def registry_path(override=None):
     """The registry file: the override, else under $XDG_CONFIG_HOME (absolute) or ~/.config."""
     if override is not None:
         if not override:
             raise InstallError("--registry needs a file name")
-        return os.path.abspath(os.path.expanduser(override))
+        resolved = os.path.abspath(os.path.expanduser(override))
+        if resolved.endswith(APPROVALS_SUFFIX):
+            raise InstallError("--registry names an approvals file (it ends in %s); name the registry file instead"
+                               % APPROVALS_SUFFIX)
+        return resolved
     base = os.environ.get("XDG_CONFIG_HOME", "")
     if not (base and os.path.isabs(base)):
         base = os.path.join(os.path.expanduser("~"), ".config")
@@ -493,15 +526,19 @@ def load_registry(path):
 
 
 def save_registry(path, stores):
-    parent = os.path.dirname(path)
-    if os.path.islink(parent):
-        raise InstallError("registry directory is a symlink: %s" % parent)
-    if os.path.lexists(path) and not stat.S_ISREG(os.lstat(path).st_mode):
-        raise InstallError("registry is not a regular file: %s" % path)
-    payload = {
+    write_state_file(path, {
         "schema": REGISTRY_SCHEMA,
         "stores": {name: {"path": stores[name]} for name in sorted(stores)},
-    }
+    }, "registry")
+
+
+def write_state_file(path, payload, what):
+    """Write a small private JSON file beside the registry: no symlinked directory, temporary sibling, rename."""
+    parent = os.path.dirname(path)
+    if os.path.islink(parent):
+        raise InstallError("%s directory is a symlink: %s" % (what, parent))
+    if os.path.lexists(path) and not stat.S_ISREG(os.lstat(path).st_mode):
+        raise InstallError("%s is not a regular file: %s" % (what, path))
     data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
     temp = "%s.tmp-%d" % (path, os.getpid())
     try:
@@ -511,12 +548,93 @@ def save_registry(path, stores):
             handle.write(data)
         os.replace(temp, path)
     except OSError as exc:
-        raise InstallError("cannot write registry %s: %s" % (path, exc.strerror or exc))
+        raise InstallError("cannot write %s %s: %s" % (what, path, exc.strerror or exc))
     finally:
         try:
             os.unlink(temp)
         except OSError:
             pass
+
+
+def approvals_path(location):
+    return location + APPROVALS_SUFFIX
+
+
+def malformed_approvals(path, why):
+    return InstallError("approvals file %s is malformed (%s)" % (path, why))
+
+
+def load_approvals(path):
+    """Return {name: {"path", "digest"}}; a missing file means no approvals. Contents are never echoed."""
+    parent = os.path.dirname(path)
+    if os.path.islink(parent):
+        raise InstallError("registry directory is a symlink: %s" % parent)
+    if not os.path.lexists(path):
+        return {}
+    raw = read_regular(path, MAX_REGISTRY_BYTES)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise malformed_approvals(path, "not valid JSON")
+    if not isinstance(data, dict) or set(data) != {"schema", "approvals"}:
+        raise malformed_approvals(path, "expected an object with schema and approvals")
+    if isinstance(data["schema"], bool) or data["schema"] != REGISTRY_SCHEMA:
+        raise malformed_approvals(path, "unknown schema")
+    if not isinstance(data["approvals"], dict):
+        raise malformed_approvals(path, "approvals is not an object")
+    approvals = {}
+    for name, entry in data["approvals"].items():
+        if not EXT_NAME_RE.match(name):
+            raise malformed_approvals(path, "invalid store name")
+        if not isinstance(entry, dict) or set(entry) != {"path", "digest"}:
+            raise malformed_approvals(path, "invalid approval entry")
+        where, digest = entry["path"], entry["digest"]
+        if not (isinstance(where, str) and os.path.isabs(where) and where.isprintable()):
+            raise malformed_approvals(path, "path must be an absolute single line")
+        if not (isinstance(digest, str) and DIGEST_RE.match(digest)):
+            raise malformed_approvals(path, "digest must be 64 lowercase hex digits")
+        approvals[name] = {"path": where, "digest": digest}
+    return approvals
+
+
+def save_approvals(path, approvals):
+    write_state_file(path, {
+        "schema": REGISTRY_SCHEMA,
+        "approvals": {name: dict(approvals[name]) for name in sorted(approvals)},
+    }, "approvals file")
+
+
+def approval_problem(args, name, meta, state):
+    """Why a store with a harness tree may not install, or None when it is approved or needs none.
+
+    `state` is a one-element cache so the registry and the approvals file are read once, and only for
+    a store that has a `harness/` tree.
+    """
+    if not meta.get("has_harness"):
+        return None
+    if not state:
+        location = registry_path(args.registry)
+        state.append((load_registry(location), load_approvals(approvals_path(location))))
+    stores, approvals = state[0]
+    steps = ("run `install.py --register PATH`, read the files it lists, then `install.py --approve DIGEST "
+             "--name %s`" % name)
+    if name not in stores or not same_store(stores[name], meta["path"]):
+        return "module %s ships harness files, so it must be registered at this path and approved: %s" % (name, steps)
+    entry = approvals.get(name)
+    if entry is None or not same_store(entry["path"], meta["path"]):
+        return "module %s ships harness files and is not approved: %s" % (name, steps)
+    if entry["digest"] != meta["digest"]:
+        return "module %s changed since it was approved: %s" % (name, steps)
+    return None
+
+
+def require_approvals(args, externals):
+    """Refuse, before anything is written, a store whose harness files are not approved."""
+    state = []
+    for name in sorted(externals):
+        problem = approval_problem(args, name, externals[name], state)
+        if problem:
+            raise InstallError(problem)
 
 
 def registered_entries(args, entries, builtin):
@@ -662,6 +780,7 @@ HARNESSES = {
         "root": ".claude",
         "root_files": ("CLAUDE.md",),
         "entries": ("skills", "agents", "commands", "remote-runner.toml"),
+        "store_entries": ("skills", "agents", "commands"),
         "marker": "global-config.json",
         "gitignore": ("/.claude/settings.local.json",),
     },
@@ -719,9 +838,26 @@ def check_harness_dirs(module):
                                % (module["name"], shown_text(entry, 32), ", ".join(sorted(HARNESSES))))
 
 
-def harness_source_ok(rel, is_dir, spec, name):
-    """The position rules of "Layout": which source entries a harness directory may hold."""
+STORE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+UNIT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}\Z")
+FRONTMATTER_KEY_RE = re.compile(r"^[a-z][a-z-]*\Z")
+FRONTMATTER_VALUE_FORBIDDEN = set("{[&*!|>#\"'")
+
+
+def harness_source_ok(rel, is_dir, spec, name, strict=False):
+    """The position rules of "Layout": which source entries a harness directory may hold.
+
+    `strict` is the rule set for an external store: no `root/`, no `remote-runner.toml`, ASCII
+    components, and a `.md` name for every file except `harness.json`.
+    """
     parts = rel.split("/")
+    if strict:
+        if not all(STORE_COMPONENT_RE.match(part) for part in parts):
+            raise InstallError("module %s: harness path %s is not plain ASCII" % (name, shown_text(rel)))
+        if parts[0] not in spec["store_entries"] + (HARNESS_JSON,):
+            raise InstallError("module %s: harness entry %s is not allowed in a store" % (name, shown_text(rel)))
+        if not is_dir and parts[0] != HARNESS_JSON and not rel.endswith(".md"):
+            raise InstallError("module %s: harness file %s is not a .md file" % (name, shown_text(rel)))
     if not safe_relpath(rel):
         raise InstallError("module %s: unsafe harness path %s" % (name, shown_text(rel)))
     if len(parts) > HARNESS_MAX_DEPTH:
@@ -735,6 +871,7 @@ def harness_source_ok(rel, is_dir, spec, name):
             len(parts) == 2 and not is_dir and parts[1] in spec["root_files"])
     elif top in spec["entries"]:
         ok = (len(parts) > 1 or is_dir == (not top.endswith(".toml")))
+
     else:
         ok = False
     if not ok:
@@ -777,8 +914,72 @@ def harness_unit(installed, spec):
     return None
 
 
-def read_harness_tree(module, harness, reserved=frozenset(), budget=None):
-    """Read and check a built-in module's `harness/<harness>/` tree.
+def strict_frontmatter(text, unit, name, rel):
+    """The store grammar for a unit's primary file: exact `---` fences, plain `key: value` lines, one `name`."""
+    def bad(why):
+        return InstallError("module %s: %s: frontmatter %s" % (name, shown_text(rel), why))
+
+    lines = text.split("\n")
+    if lines[0] != "---":
+        raise bad("must start with a line of exactly ---")
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        raise bad("has no closing ---")
+    keys, values = [], {}
+    for line in lines[1:end]:
+        if line[:1] in (" ", "\t") and line.strip():
+            if keys and keys[-1] == "name":
+                raise bad("continues the name onto another line")
+            continue  # a continuation of the previous value
+        key, sep, value = line.partition(":")
+        if not (sep and FRONTMATTER_KEY_RE.match(key)):
+            raise bad("has a line that is not `key: value`")
+        if key in values:
+            raise bad("repeats a key")
+        if value and not value.startswith(" "):
+            raise bad("has a value that does not follow the key and a space")
+        values[key] = value.strip()
+        keys.append(key)
+    if "name" not in values:
+        raise bad("has no name")
+    if values["name"] != unit or any(ch in FRONTMATTER_VALUE_FORBIDDEN for ch in values["name"]):
+        raise bad("name must equal the unit name %s with no quoting or flow syntax" % shown_text(unit))
+
+
+def strict_text_ok(text):
+    """No C0 or C1 control character but LF, and none of the Unicode line or paragraph separators."""
+    return all(ch == "\n" or not (ord(ch) < 32 or 127 <= ord(ch) < 160 or ch in "\u2028\u2029") for ch in text)
+
+
+def check_store_units(contents, name):
+    """Each store unit has exactly its allowed shape, and its primary file the strict frontmatter."""
+    skills = {}
+    for rel in contents:
+        parts = rel.split("/")
+        if rel == HARNESS_JSON:
+            continue
+        kind = parts[0]
+        if kind == "skills":
+            if len(parts) < 3 or not UNIT_NAME_RE.match(parts[1]):
+                raise InstallError("module %s: skill %s is not skills/<name>/..." % (name, shown_text(rel)))
+            skills.setdefault(parts[1], []).append(rel)
+        else:
+            stem = parts[1][:-3] if len(parts) == 2 else ""
+            if len(parts) != 2 or not UNIT_NAME_RE.match(stem):
+                raise InstallError("module %s: %s is not %s/<name>.md" % (name, shown_text(rel), kind))
+            strict_frontmatter(contents[rel].decode("utf-8"), stem, name, rel)
+    for unit, files in skills.items():
+        primary = "skills/%s/SKILL.md" % unit
+        if primary not in contents:
+            raise InstallError("module %s: skill %s has no SKILL.md directly in it" % (name, shown_text(unit)))
+        strict_frontmatter(contents[primary].decode("utf-8"), unit, name, primary)
+
+
+def read_harness_tree(module, harness, reserved=frozenset(), budget=None, strict=False, raw=None):
+    """Read and check a module's `harness/<harness>/` tree; `strict` is the external store rule set.
+
+    `raw`, when given, receives {source rel: bytes} for the digest of a store.
 
     Returns ({installed path: bytes}, {unit path: name}). The walk counts and
     stats first and reads no file until every count, depth, shape and size
@@ -811,10 +1012,10 @@ def read_harness_tree(module, harness, reserved=frozenset(), budget=None):
                 raise InstallError("module %s: symlink not allowed in harness: %s"
                                    % (name, shown_text(rel)))
             if stat.S_ISDIR(info.st_mode):
-                harness_source_ok(rel, True, spec, name)
+                harness_source_ok(rel, True, spec, name, strict)
                 stack.append((rel, full))
             elif stat.S_ISREG(info.st_mode):
-                harness_source_ok(rel, False, spec, name)
+                harness_source_ok(rel, False, spec, name, strict)
                 if len(found) >= HARNESS_MAX_FILES:
                     raise InstallError("module %s: more than %d harness files"
                                        % (name, HARNESS_MAX_FILES))
@@ -841,7 +1042,14 @@ def read_harness_tree(module, harness, reserved=frozenset(), budget=None):
         if any(marker in text for marker in FRAGMENT_FORBIDDEN):
             raise InstallError("module %s: harness file holds a slot or block marker: %s"
                                % (name, shown_text(rel)))
+        if strict and not strict_text_ok(text):
+            raise InstallError("module %s: harness file holds a control character: %s"
+                               % (name, shown_text(rel)))
         contents[rel] = data
+    if strict:
+        check_store_units(contents, name)
+    if raw is not None:
+        raw.update(contents)
     if HARNESS_JSON in contents:
         if name == BASE_SUPPLIER:
             raise InstallError("base/harness/%s: %s is not allowed (only a module declares roles)"
@@ -948,7 +1156,51 @@ def prepare_harness(names, modules, harness, project_name, installed=(), include
                 raise InstallError("module %s: harness file holds a slot or block marker after "
                                    "substitution: %s" % (name, shown_text(path)))
         trees[name] = (files, units)
+    for name in names:
+        meta = modules[name]
+        tree = meta.get("harness_trees", {}).get(harness) if meta.get("external") else None
+        if not tree:
+            continue
+        files = dict(tree["files"])
+        for data in files.values():
+            budget.add(len(data))
+        substitute_store_harness(files, project_name, name, meta["store"])
+        for path, data in files.items():
+            if any(marker.encode() in data for marker in FRAGMENT_FORBIDDEN):
+                raise InstallError("module %s: harness file holds a slot or block marker after "
+                                   "substitution: %s" % (name, shown_text(path)))
+        trees[name] = (files, dict(tree["units"]))
     return trees
+
+
+STORE_PLACEHOLDER_RE = re.compile(
+    rb"REPLACE_WITH_(PROJECT_NAME|PROJECT_ID|MODULE_NAME|MODULE_PATH)")
+STORE_PATH_VALUE_RE = re.compile(r"[A-Za-z0-9._/ -]{1,512}\Z")
+
+
+def substitute_store_harness(files, project_name, module_name, where):
+    """Replace the four placeholders of an approved store's harness files in a single pass.
+
+    A value that could carry text into an approved file is refused before any write: the project name
+    and the store path must be plain, and a replacement is never scanned again, so a value that
+    spells another placeholder stays literal.
+    """
+    values = {b"MODULE_NAME": module_name.encode("utf-8")}
+    for rel, data in files.items():
+        for match in STORE_PLACEHOLDER_RE.finditer(data):
+            kind = match.group(1)
+            if kind in (b"PROJECT_NAME", b"PROJECT_ID") and not HARNESS_PROJECT_NAME_RE.match(project_name):
+                raise InstallError("project name %s cannot be written into harness files; "
+                                   "use letters, digits, '.', '_', '-' and spaces (pass --name)"
+                                   % shown_text(project_name))
+            if kind == b"MODULE_PATH" and not STORE_PATH_VALUE_RE.match(where):
+                raise InstallError("module %s: its path cannot be written into harness files" % module_name)
+    values[b"PROJECT_NAME"] = project_name.encode("utf-8")
+    values[b"MODULE_PATH"] = where.encode("utf-8")
+    if any(ID_PLACEHOLDER in data for data in files.values()):
+        values[b"PROJECT_ID"] = project_id(project_name).encode("utf-8")
+    for rel, data in list(files.items()):
+        files[rel] = STORE_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], data)
 
 
 class HarnessPlan:
@@ -1098,6 +1350,13 @@ NOT_TEXT_NOTE = "%s is not UTF-8 text; the harness block was not added or checke
 
 def read_harness_roles(module, harness):
     """{role: installed path} from the module's harness.json for `harness`, or {}."""
+    if module.get("external"):
+        data = module.get("harness_trees", {}).get(harness, {}).get("sources", {}).get(HARNESS_JSON)
+        try:
+            roles = json.loads(data.decode("utf-8")).get("roles", {}) if data else {}
+            return {role: installed_harness_path(rel, HARNESSES[harness]) for role, rel in roles.items()}
+        except (ValueError, RecursionError, AttributeError):
+            return {}
     path = os.path.join(module["path"], "harness", harness, HARNESS_JSON)
     if not os.path.lexists(path):
         return {}
@@ -1113,7 +1372,7 @@ def report_declarations(out, names, modules, harness, record, global_config=None
     lines = []
     for name in names:
         meta = modules.get(name)
-        if meta is None or meta.get("external"):
+        if meta is None:
             continue
         for helper in meta["helpers"]:
             lines.append("%s: helper %s: %s"
@@ -2169,6 +2428,7 @@ def cmd_new(args, out):
     externals = load_externals(
         [(n, v) for n, v in entries if v is not None], target, builtin, registered
     )
+    require_approvals(args, externals)
     modules = dict(modules, **externals)
     selected = [n for n, _ in entries]
     names = resolve(selected, modules)
@@ -2278,6 +2538,88 @@ def cmd_list(args, out):
     return 0
 
 
+ADVISORY_PHRASES = ("ignore previous", "disregard", "allowed-tools", "hooks:", "mcpServers", "permissionMode",
+                    "bypassPermissions", "dangerously", "curl ", "wget ", "| sh", "sudo ", "rm -rf")
+REVIEW_VALUE_MAX = 200
+
+
+def review_text(value):
+    """A value taken from a store file, ASCII-escaped and capped, so it cannot move the cursor or hide lines."""
+    text = ascii(str(value))[1:-1]
+    return text if len(text) <= REVIEW_VALUE_MAX else text[:REVIEW_VALUE_MAX] + "..."
+
+
+def frontmatter_fields(text):
+    lines = text.split("\n")
+    fields = {}
+    for line in lines[1:]:
+        if line == "---":
+            break
+        key, sep, value = line.partition(":")
+        if sep and line[:1] not in (" ", "\t"):
+            fields[key] = value.strip()
+    return fields
+
+
+def builtin_unit_names(harness):
+    """{folded unit name: built-in module} for every unit a built-in module ships for `harness`."""
+    found = {}
+    for name, meta in sorted(load_modules().items()):
+        try:
+            _, units = read_harness_tree(meta, harness)
+        except (InstallError, OSError):
+            continue
+        for unit in units.values():
+            found.setdefault(fold(unit), name)
+    return found
+
+
+def review_store(meta, name, out):
+    """Print what an approval of this store would cover; reads the store, installs nothing."""
+    if not meta.get("has_harness"):
+        return
+    descriptor = os.path.join(meta["path"], DESCRIPTOR_DIR)
+    findings = []
+    out("Harness files to review (%s):" % name)
+    for harness, tree in sorted(meta["harness_trees"].items()):
+        out("  harness %s: %d file(s)" % (harness, len(tree["sources"])))
+        builtin_names = builtin_unit_names(harness)
+        for rel in sorted(tree["sources"]):
+            data = tree["sources"][rel]
+            out("  %s  %d bytes  sha256 %s" % (review_text(rel), len(data), hashlib.sha256(data).hexdigest()))
+            mode = os.lstat(os.path.join(descriptor, "harness", harness, *rel.split("/"))).st_mode
+            if mode & 0o111:
+                findings.append("executable: %s" % review_text(rel))
+            text = data.decode("utf-8")
+            lowered = text.lower()
+            for phrase in ADVISORY_PHRASES:
+                if phrase.lower() in lowered:
+                    findings.append("phrase %s in %s" % (review_text(repr(phrase)), review_text(rel)))
+            if any(line.startswith("!") for line in text.split("\n")):
+                findings.append("line starting with ! in %s" % review_text(rel))
+        for unit_path, unit_name in sorted(tree["units"].items()):
+            kind = unit_path.split("/")[-2] if unit_path.count("/") >= 2 else "unit"
+            primary = unit_path + "/SKILL.md" if kind == "skills" else unit_path
+            fields = frontmatter_fields(tree["files"][primary].decode("utf-8"))
+            for key in sorted(set(fields) - {"name", "description", "tools"}):
+                findings.append("frontmatter key %s in %s" % (review_text(repr(key)), review_text(
+                    primary[len(HARNESSES[harness]["root"]) + 1:])))
+            out("  %s %s: description %s tools %s" % (
+                {"skills": "skill", "agents": "agent", "commands": "command"}.get(kind, kind),
+                review_text(unit_name), review_text(repr(fields.get("description", ""))),
+                review_text(repr(fields.get("tools", "")))))
+            other = builtin_names.get(fold(unit_name))
+            if other:
+                findings.append("unit name %s is also shipped by the built-in module %s"
+                                % (review_text(repr(unit_name)), other))
+    out("Findings (advisory; a short or empty list is not a clean bill):")
+    for finding in findings or ["none"]:
+        out("  %s" % finding)
+    out("Digest: %s" % meta["digest"])
+    out("Read exactly these files, then approve with: install.py --approve %s --name %s"
+        % (meta["digest"], name))
+
+
 def cmd_register(args, out):
     if not args.register:
         raise InstallError("--register needs the path of a standalone project")
@@ -2291,6 +2633,7 @@ def cmd_register(args, out):
     stores = load_registry(location)
     if name in stores and same_store(stores[name], meta["path"]):
         out("%s is already registered at %s." % (name, meta["path"]))
+        review_store(meta, name, out)
         return 0
     if name in stores:
         raise InstallError(
@@ -2303,12 +2646,14 @@ def cmd_register(args, out):
             )
     if args.dry_run:
         out("Would register %s -> %s (%s)" % (name, meta["path"], meta["description"]))
+        review_store(meta, name, out)
         out("Dry run: nothing written.")
         return 0
     stores[name] = meta["path"]
     save_registry(location, stores)
     out("Registered %s -> %s" % (name, meta["path"]))
     out("  %s" % meta["description"])
+    review_store(meta, name, out)
     return 0
 
 
@@ -2320,16 +2665,73 @@ def cmd_unregister(args, out):
         raise InstallError("%s is a built-in module, not a registered store" % name)
     location = registry_path(args.registry)
     stores = load_registry(location)
-    if name not in stores:
+    approvals = load_approvals(approvals_path(location))
+    if name not in stores and name not in approvals:
         out("%s is not registered." % name)
         return 0
     if args.dry_run:
-        out("Would unregister %s (%s)" % (name, stores[name]))
+        if name in stores:
+            out("Would unregister %s (%s)" % (name, stores[name]))
+        if name in approvals:
+            out("Would remove the approval of %s" % name)
         out("Dry run: nothing written.")
         return 0
-    del stores[name]
-    save_registry(location, stores)
-    out("Unregistered %s." % name)
+    if name in approvals:  # first, so a failure leaves the store registered but unapproved
+        del approvals[name]
+        save_approvals(approvals_path(location), approvals)
+        out("Removed the approval of %s." % name)
+    if name in stores:
+        del stores[name]
+        save_registry(location, stores)
+        out("Unregistered %s." % name)
+    else:
+        out("%s is not registered." % name)
+    return 0
+
+
+def cmd_approve(args, out):
+    digest, name = args.approve, args.name
+    if not (isinstance(digest, str) and DIGEST_RE.match(digest)):
+        raise InstallError("--approve needs the 64-character lowercase hex digest printed by --register")
+    if not name or not EXT_NAME_RE.match(name):
+        raise InstallError("--approve needs --name with the registered name of the store")
+    location = registry_path(args.registry)
+    stores = load_registry(location)
+    if name not in stores:
+        raise InstallError("%s is not registered; run --register first" % name)
+    meta = load_external(name, stores[name], None, set(load_modules()))
+    if not meta["has_harness"]:
+        raise InstallError("%s has no harness/ tree, so there is nothing to approve" % name)
+    if meta["digest"] != digest:
+        raise InstallError("the digest of %s is not the one given (the store changed, or this is not the digest "
+                           "--register prints); review it again with --register" % name)
+    approvals = load_approvals(approvals_path(location))
+    if args.dry_run:
+        out("Would approve %s at %s (digest %s)" % (name, meta["path"], digest))
+        out("Dry run: nothing written.")
+        return 0
+    approvals[name] = {"path": meta["path"], "digest": digest}
+    save_approvals(approvals_path(location), approvals)
+    out("Approved %s at %s (digest %s)." % (name, meta["path"], digest))
+    return 0
+
+
+def cmd_unapprove(args, out):
+    name = args.unapprove
+    if not name or not EXT_NAME_RE.match(name):
+        raise InstallError("invalid store name %r" % name)
+    location = registry_path(args.registry)
+    approvals = load_approvals(approvals_path(location))
+    if name not in approvals:
+        out("%s is not approved." % name)
+        return 0
+    if args.dry_run:
+        out("Would remove the approval of %s" % name)
+        out("Dry run: nothing written.")
+        return 0
+    del approvals[name]
+    save_approvals(approvals_path(location), approvals)
+    out("Removed the approval of %s." % name)
     return 0
 
 
@@ -2349,6 +2751,7 @@ def cmd_add(args, out):
     builtin = set(modules)
     manifest = load_manifest(project, builtin)
     installed = list(manifest["modules"])
+    manifest_before_externals = dict(manifest.get("external_modules", {}))
     for name in installed:
         if name in RETIRED_MODULES:
             raise InstallError("this project lists the retired module %s; run a full --update first to migrate "
@@ -2364,6 +2767,7 @@ def cmd_add(args, out):
     externals = load_externals(
         [(n, v) for n, v in fresh if v is not None], project, builtin, registered
     )
+    require_approvals(args, externals)
     modules = dict(modules, **externals)
     wanted = resolve(list(installed) + [n for n, _ in fresh], modules)
     new = [name for name in wanted if name not in installed]
@@ -2465,9 +2869,10 @@ def cmd_add(args, out):
         report_harness(out, harness_plan, harness, trees)
         if ignore_note:
             out("  note: %s" % ignore_note)
-        if activating and recorded:
+        earlier = sorted(manifest_before_externals)
+        if activating and earlier:
             out("  note: the harness files of external modules already installed (%s) were "
-                "not read, so none were installed" % ", ".join(sorted(recorded)))
+                "not read, so none were installed" % ", ".join(earlier))
     private = set(harness_plan.writes) if harness_plan else ()
     reported = [n for n in wanted if n in modules and (activating or n in new)]
     record = harness_plan.record if harness_plan else {}
@@ -2496,7 +2901,9 @@ def load_update_externals(args, entries, recorded, project, builtin, notes):
     if entries:
         named = [(n, v) for n, v in entries if n in recorded]
         named, registered = registered_entries(args, named, builtin)
-        return load_externals(named, project, builtin, registered)
+        loaded = load_externals(named, project, builtin, registered)
+        require_approvals(args, loaded)
+        return loaded
     if not recorded:
         return {}
     try:
@@ -2504,13 +2911,17 @@ def load_update_externals(args, entries, recorded, project, builtin, notes):
     except InstallError as exc:
         notes.append("external modules skipped: %s" % exc)
         return {}
-    loaded = {}
+    loaded, state = {}, []
     for name in sorted(recorded):
         if name not in stores:
             notes.append("%s skipped: not registered; name it as %s=PATH to update it" % (name, name))
             continue
         try:
-            loaded.update(load_externals([(name, stores[name])], project, builtin, {name}))
+            found = load_externals([(name, stores[name])], project, builtin, {name})
+            problem = approval_problem(args, name, found[name], state)
+            if problem:
+                raise InstallError(problem)
+            loaded.update(found)
         except InstallError as exc:
             notes.append("%s skipped: %s" % (name, exc))
     return loaded
@@ -2775,8 +3186,10 @@ def cmd_update(args, out):
     harness_plan, trees = None, {}
     check_module_harness_dirs(targets, modules)
     if harness:
-        trees = prepare_harness(targets, modules, harness, project_name, installed=present,
-                                include_base=not entries)
+        # Approved external modules are read by now (load_update_externals checked their approval), so
+        # their harness files install here, including those a later `--add --harness` could not read.
+        trees = prepare_harness(targets + sorted(externals), dict(modules, **externals), harness,
+                                project_name, installed=present, include_base=not entries)
         harness_plan = plan_harness(trees, harness, existing, manifest["harness_files"], project)
         writes.update(harness_plan.writes)
         if not entries:
@@ -2860,7 +3273,7 @@ def cmd_update(args, out):
         out("  note: %s" % note)
     if harness_plan:
         report_harness(out, harness_plan, harness, trees)
-    report_safely(out, targets, modules, harness,
+    report_safely(out, targets + sorted(externals), dict(modules, **externals), harness,
                   harness_plan.record if harness_plan else {}, args.global_config,
                   dry_run=args.dry_run)
     record_changed = bool(harness_plan) and (migrating or harness_plan.record != manifest["harness_files"])
@@ -3103,7 +3516,11 @@ def build_parser():
     )
     parser.add_argument("--register", metavar="PATH",
                         help="register a standalone project so its name works in --with and --add")
-    parser.add_argument("--unregister", metavar="NAME", help="remove a registered name")
+    parser.add_argument("--unregister", metavar="NAME", help="remove a registered name and its approval")
+    parser.add_argument("--approve", metavar="DIGEST",
+                        help="approve the harness files of the registered store given by --name, "
+                             "by the digest --register prints")
+    parser.add_argument("--unapprove", metavar="NAME", help="remove a store's approval")
     parser.add_argument("--registry", metavar="FILE",
                         help="registry file (default: ~/.config/claude-project-template/registry.json)")
     parser.add_argument("--dry-run", action="store_true", help="show what would be written")
@@ -3164,6 +3581,17 @@ def main(argv=None, out=print):
         if args.merge and args.update:
             raise InstallError("--merge cannot be limited to named modules: "
                                "it brings every installed module up to date")
+        approval_modes = (args.approve is not None) + (args.unapprove is not None)
+        if approval_modes:
+            allowed = {"approve", "unapprove", "name", "registry", "dry_run", "global_config"}
+            defaults = vars(build_parser().parse_args([]))
+            extra = sorted(k for k, v in vars(args).items() if k not in allowed and v != defaults[k])
+            if approval_modes > 1 or extra:
+                raise InstallError("--approve and --unapprove accept only --name, --registry, --dry-run "
+                                   "and --global-config, with no target and no other mode")
+            if args.approve is not None:
+                return cmd_approve(args, out)
+            return cmd_unapprove(args, out)
         registry_modes = (args.register is not None) + (args.unregister is not None)
         if args.harness is not None and (args.list or registry_modes or removing):
             raise InstallError("--harness applies to a new project, --add and --update only")

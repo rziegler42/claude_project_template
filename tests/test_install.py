@@ -1213,6 +1213,8 @@ class InteractivePromptTest(unittest.TestCase):
 FIXTURE_MODULE = b'{"module_format": 1, "description": "Fixture store"}\n'
 FIXTURE_SLOT = b"## Fixture guidance\n\nRead REPLACE_WITH_MODULE_PATH/router.md.\n"
 # Computed independently of install.py with the spec's digest algorithm.
+# Computed independently of install.py; the two skills sort as `a-b` before `a/`.
+STORE_DIGEST_LITERAL = "86a5367912b273c0410b545cce7de535950a0f28836b00f2586d6b66c78d7411"
 FIXTURE_DIGEST = "cf9d227a545469fbe589ff4e65d3a4b4878bd32bd1a3f14341acee82fe7da26d"
 
 
@@ -1397,7 +1399,7 @@ class ExternalModuleTest(unittest.TestCase):
             "unknown key": module(b'{"module_format": 1, "description": "d", "order": 3}'),
             "mistyped description": module(b'{"module_format": 1, "description": 5}'),
             "bool format": module(b'{"module_format": true, "description": "d"}'),
-            "unknown format": module(b'{"module_format": 3, "description": "d"}'),
+            "unknown format": module(b'{"module_format": 4, "description": "d"}'),
             "empty description": module(b'{"module_format": 1, "description": ""}'),
             "long description": module(json.dumps(
                 {"module_format": 1, "description": "d" * 201}).encode()),
@@ -1427,7 +1429,7 @@ class ExternalModuleTest(unittest.TestCase):
         store = self.store(module=b'{"module_format": 7, "description": "d"}')
         message = self.assertRefused(store)
         self.assertIn("7", message)
-        self.assertIn("supports 1, 2", message)
+        self.assertIn("supports 1, 2, 3", message)
 
     def test_format_two_declares_type_paths_and_data(self):
         store = self.store(module=json.dumps({
@@ -1475,11 +1477,11 @@ class ExternalModuleTest(unittest.TestCase):
                 message = self.assertRefused(self.store(module=json.dumps(meta).encode()))
                 self.assertIn("kb", message)
 
-    def test_format_three_reports_the_format_even_with_info_keys(self):
+    def test_a_later_format_reports_the_format_even_with_info_keys(self):
         store = self.store(module=json.dumps(
-            {"module_format": 3, "description": "d", "type": "kb"}).encode())
+            {"module_format": 4, "description": "d", "type": "kb"}).encode())
         message = self.assertRefused(store)
-        self.assertIn("module_format 3", message)
+        self.assertIn("module_format 4", message)
         self.assertNotIn("unknown module.json keys", message)
 
     def test_refusal_does_not_echo_content(self):
@@ -1810,7 +1812,7 @@ class ExternalModuleTest(unittest.TestCase):
             "not an object": [],
             "bad name": {"Bad": good},
             "builtin name": {"cad": good},
-            "unknown format": {"kb": {"module_format": 3, "digest": FIXTURE_DIGEST}},
+            "unknown format": {"kb": {"module_format": 4, "digest": FIXTURE_DIGEST}},
             "bool format": {"kb": {"module_format": True, "digest": FIXTURE_DIGEST}},
             "short digest": {"kb": {"module_format": 1, "digest": "ab"}},
             "digest with newline": {"kb": {"module_format": 1, "digest": FIXTURE_DIGEST + "\n"}},
@@ -5649,6 +5651,917 @@ class RetiredAddHintTest(RetiredModuleTest):
         self.assertEqual(code, 2)
         self.assertIn("full --update", err)
         self.assertEqual(self.read(".template-manifest"), before)
+
+
+STORE3 = b'{"module_format": 3, "description": "Harness store"}\n'
+SKILL_TEXT = "---\nname: demo\ndescription: A demo skill\n---\nBody for REPLACE_WITH_PROJECT_NAME\n"
+AGENT_TEXT = "---\nname: helper\ndescription: A helper\ntools: Read\n---\nAgent body\n"
+
+
+def make_harness_store(parent, name="hstore", files=None, module=STORE3, slots=None, harness="claude"):
+    """A format 3 store with `harness/<harness>/<rel>` files; `files` is {rel: text or bytes}."""
+    store = make_store(parent, name, slots=slots, module=module)
+    base = os.path.join(store, "template-module", "harness", harness)
+    os.makedirs(base)
+    for rel, data in (files if files is not None else {"skills/demo/SKILL.md": SKILL_TEXT}).items():
+        full = os.path.join(base, *rel.split("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as handle:
+            handle.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+    return store
+
+
+def framed_digest(files):
+    """The spec's digest, computed here without install.py."""
+    import hashlib
+    digest = hashlib.sha256()
+    for rel, data in files:
+        digest.update(rel.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0" + data)
+    return digest.hexdigest()
+
+
+class StoreHarnessTreeTest(unittest.TestCase):
+    """Plan 0024 increment A: module_format 3, the store tree rules and the digest."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        self.builtin = set(install.load_modules())
+
+    def read(self, store, name="hstore"):
+        return install.load_external(name, store, None, self.builtin)
+
+    def refused(self, store, fragment=None):
+        with self.assertRaises(install.InstallError) as ctx:
+            self.read(store)
+        if fragment:
+            self.assertIn(fragment, str(ctx.exception))
+        return str(ctx.exception)
+
+    def test_a_valid_store_is_read_with_its_tree_digest_and_units(self):
+        store = make_harness_store(self.work, files={"skills/demo/SKILL.md": SKILL_TEXT,
+                                                     "skills/demo/notes.md": "notes\n",
+                                                     "agents/helper.md": AGENT_TEXT})
+        meta = self.read(store)
+        self.assertEqual(meta["module_format"], 3)
+        self.assertTrue(meta["has_harness"])
+        tree = meta["harness_trees"]["claude"]
+        self.assertEqual(sorted(tree["files"]), [".claude/agents/helper.md", ".claude/skills/demo/SKILL.md",
+                                                 ".claude/skills/demo/notes.md"])
+        self.assertEqual(sorted(tree["units"].values()), ["demo", "helper"])
+        self.assertEqual(tree["files"][".claude/skills/demo/SKILL.md"], SKILL_TEXT.encode())
+
+    def test_the_digest_follows_the_spec_framing(self):
+        store = make_harness_store(self.work, files={"skills/demo/SKILL.md": SKILL_TEXT,
+                                                     "agents/helper.md": AGENT_TEXT})
+        meta = self.read(store)
+        slot = FIXTURE_SLOT
+        expected = framed_digest([
+            ("module.json", STORE3), ("slots/agents-guidance.md", slot),
+            ("harness/claude/agents/helper.md", AGENT_TEXT.encode()),
+            ("harness/claude/skills/demo/SKILL.md", SKILL_TEXT.encode())])
+        self.assertEqual(meta["digest"], expected)
+        self.assertEqual(len(expected), 64)
+
+    def test_the_digest_literal_for_a_fixed_store(self):
+        store = make_harness_store(self.work, files={"skills/a/SKILL.md": "---\nname: a\n---\nA\n",
+                                                     "skills/a-b/SKILL.md": "---\nname: a-b\n---\nB\n"})
+        self.assertEqual(self.read(store)["digest"], STORE_DIGEST_LITERAL)
+
+    def test_any_change_to_any_part_changes_the_digest(self):
+        base = self.read(make_harness_store(self.work, "s0"))["digest"]
+        variants = {
+            "harness byte": dict(files={"skills/demo/SKILL.md": SKILL_TEXT + "x\n"}),
+            "extra harness file": dict(files={"skills/demo/SKILL.md": SKILL_TEXT, "skills/demo/n.md": "n\n"}),
+            "no harness file": dict(files={}),
+            "module.json": dict(module=b'{"module_format": 3, "description": "Other"}\n'),
+            "slot": dict(slots={"agents-guidance": b"changed\n"}),
+            "harness.json": dict(files={"skills/demo/SKILL.md": SKILL_TEXT, "harness.json": '{"roles": {}}'}),
+        }
+        seen = {base}
+        for index, (label, kwargs) in enumerate(variants.items(), 1):
+            with self.subTest(label=label):
+                digest = self.read(make_harness_store(self.work, "s%d" % index, **kwargs))["digest"]
+                self.assertNotIn(digest, seen)
+                seen.add(digest)
+
+    def test_substitution_does_not_change_the_digest_and_files_are_stored_raw(self):
+        meta = self.read(make_harness_store(self.work))
+        self.assertIn(b"REPLACE_WITH_PROJECT_NAME", meta["harness_trees"]["claude"]["files"][".claude/skills/demo/SKILL.md"])
+
+    def test_formats_1_and_2_refuse_the_new_keys_and_any_harness_entry(self):
+        for fmt in (1, 2):
+            for key, value in (("helpers", ["x"]), ("workers", {"r": "c"}), ("global_config", True)):
+                with self.subTest(fmt=fmt, key=key):
+                    module = json.dumps({"module_format": fmt, "description": "d", key: value}).encode()
+                    self.refused(make_store(self.work, "k%d%s" % (fmt, key), module=module), "unknown")
+            for label, make in (("empty dir", lambda s: os.makedirs(os.path.join(s, "template-module", "harness"))),
+                                ("file", lambda s: open(os.path.join(s, "template-module", "harness"), "w").close()),
+                                ("claude dir", lambda s: os.makedirs(os.path.join(s, "template-module", "harness", "claude")))):
+                with self.subTest(fmt=fmt, entry=label):
+                    store = make_store(self.work, "h%d%s" % (fmt, label.replace(" ", "")),
+                                       module=b'{"module_format": %d, "description": "d"}\n' % fmt)
+                    make(store)
+                    self.refused(store, "harness")
+
+    def test_a_symlinked_harness_is_refused_in_format_3(self):
+        store = make_store(self.work, "sym", module=STORE3)
+        outside = os.path.join(self.work, "outside")
+        os.makedirs(os.path.join(outside, "claude"))
+        os.symlink(outside, os.path.join(store, "template-module", "harness"))
+        self.refused(store, "harness")
+
+    def test_an_empty_harness_directory_is_a_harness_store(self):
+        meta = self.read(make_harness_store(self.work, files={}))
+        self.assertTrue(meta["has_harness"])
+        self.assertEqual(meta["harness_trees"]["claude"]["files"], {})
+
+    def test_a_format_3_store_without_harness_has_none(self):
+        meta = self.read(make_store(self.work, "plain3", module=STORE3))
+        self.assertFalse(meta["has_harness"])
+        self.assertEqual(meta["harness_trees"], {})
+
+    def test_declarations_are_read_and_validated_for_format_3(self):
+        module = json.dumps({"module_format": 3, "description": "d", "helpers": ["ask"],
+                             "workers": {"extract": "does it"}, "global_config": True}).encode()
+        meta = self.read(make_store(self.work, "decl", module=module))
+        self.assertEqual((meta["helpers"], meta["workers"], meta["global_config"]),
+                         (["ask"], {"extract": "does it"}, True))
+        for key, value in (("helpers", ["bad name"]), ("workers", {"Bad": "c"}), ("global_config", "yes")):
+            with self.subTest(key=key):
+                bad = json.dumps({"module_format": 3, "description": "d", key: value}).encode()
+                self.refused(make_store(self.work, "bad" + key, module=bad))
+
+    def test_an_unknown_harness_directory_is_refused(self):
+        store = make_harness_store(self.work, harness="opencode")
+        self.refused(store, "harness")
+
+    HOSTILE = {
+        "settings.json": {"settings.json": "{}"},
+        "settings.local.json": {"settings.local.json": "{}"},
+        "hooks": {"hooks/run.md": "x"},
+        "mcp": {".mcp.json": "{}"},
+        "root mcp": {"root/.mcp.json": "{}"},
+        "root CLAUDE.md": {"root/CLAUDE.md": "@AGENTS.md\n"},
+        "root AGENTS.md": {"root/AGENTS.md": "x\n"},
+        "runner stub": {"remote-runner.toml": "[project]\n"},
+        "loose skill": {"skills/x.md": "---\nname: x\n---\n"},
+        "nested skill": {"skills/x/y/SKILL.md": "---\nname: x\n---\n"},
+        "skill without SKILL.md": {"skills/x/other.md": "x\n"},
+        "nested agent": {"agents/x/y.md": "---\nname: y\n---\n"},
+        "nested command": {"commands/x/y.md": "---\nname: y\n---\n"},
+        "non-md": {"skills/demo/SKILL.md": SKILL_TEXT, "skills/demo/run.sh": "echo\n"},
+        "non-ascii": {"skills/d\u00e9mo/SKILL.md": "---\nname: d\u00e9mo\n---\n"},
+        "uppercase unit": {"agents/Helper.md": "---\nname: Helper\n---\n"},
+        "leading dot": {"skills/demo/SKILL.md": SKILL_TEXT, "skills/demo/.hidden.md": "x\n"},
+        "space": {"skills/demo/SKILL.md": SKILL_TEXT, "skills/demo/a b.md": "x\n"},
+        "esc": {"skills/demo/SKILL.md": SKILL_TEXT + "\x1b[31mred\n"},
+        "tab": {"skills/demo/SKILL.md": SKILL_TEXT + "a\tb\n"},
+        "cr": {"skills/demo/SKILL.md": SKILL_TEXT.replace("\n", "\r\n")},
+        "c1": {"skills/demo/SKILL.md": SKILL_TEXT + "\u0085x\n"},
+        "nul": {"skills/demo/SKILL.md": SKILL_TEXT.encode() + b"\0"},
+        "not utf8": {"skills/demo/SKILL.md": b"\xff\xfe"},
+        "slot marker": {"skills/demo/SKILL.md": SKILL_TEXT + "BEGIN module:x\n"},
+        "bom": {"skills/demo/SKILL.md": "\ufeff" + SKILL_TEXT},
+        "no frontmatter": {"skills/demo/SKILL.md": "no frontmatter\n"},
+        "no closing": {"skills/demo/SKILL.md": "---\nname: demo\nbody\n"},
+        "duplicate key": {"skills/demo/SKILL.md": "---\nname: demo\nname: demo\n---\n"},
+        "no name": {"skills/demo/SKILL.md": "---\ndescription: d\n---\n"},
+        "name in block scalar": {"skills/demo/SKILL.md": "---\ndescription: |\n  name: demo\n---\n"},
+        "quoted name": {"skills/demo/SKILL.md": '---\nname: "demo"\n---\n'},
+        "flow name": {"skills/demo/SKILL.md": "---\nname: [demo]\n---\n"},
+        "name differs": {"skills/demo/SKILL.md": "---\nname: other\n---\n"},
+        "name continuation": {"skills/demo/SKILL.md": "---\nname: demo\n  evil\n---\n"},
+        "line separator": {"skills/demo/SKILL.md": SKILL_TEXT + "a\u2028b\n"},
+        "paragraph separator": {"skills/demo/SKILL.md": SKILL_TEXT + "a\u2029b\n"},
+        "name with hash": {"skills/demo/SKILL.md": "---\nname: demo #x\n---\n"},
+        "indented key": {"skills/demo/SKILL.md": "---\n name: demo\n---\n"},
+        "bad key": {"skills/demo/SKILL.md": "---\nname: demo\nBad_Key: x\n---\n"},
+        "same name two units": {"skills/x/SKILL.md": "---\nname: x\n---\n", "agents/x.md": "---\nname: x\n---\n"},
+        "harness.json dir": {"harness.json/x.md": "x"},
+        "harness.json bad": {"skills/demo/SKILL.md": SKILL_TEXT, "harness.json": '{"roles": {"r": "agents/none.md"}}'},
+        "harness.json unknown key": {"skills/demo/SKILL.md": SKILL_TEXT, "harness.json": '{"x": 1}'},
+        "too many files": {"skills/demo/SKILL.md": SKILL_TEXT, **{"skills/demo/f%03d.md" % i: "x\n" for i in range(128)}},
+        "file over 256 KiB": {"skills/demo/SKILL.md": SKILL_TEXT + "x" * (256 * 1024)},
+        "too deep": {"skills/demo/SKILL.md": SKILL_TEXT, "skills/demo/a/b/c/d/e/f/g.md": "x\n"},
+    }
+
+    def test_every_hostile_tree_is_refused_before_anything_is_trusted(self):
+        for label, files in self.HOSTILE.items():
+            with self.subTest(label=label):
+                store = make_harness_store(self.work, "x%s" % abs(hash(label)), files=files)
+                self.refused(store)
+
+    def test_a_case_alias_in_the_tree_is_refused(self):
+        store = make_harness_store(self.work, "alias", files={"skills/demo/SKILL.md": SKILL_TEXT,
+                                                              "skills/demo/Notes.md": "a\n"})
+        extra = os.path.join(store, "template-module", "harness", "claude", "skills", "demo", "notes.md")
+        with open(extra, "w") as handle:
+            handle.write("b\n")
+        names = os.listdir(os.path.dirname(extra))
+        if len(names) < 3:
+            self.skipTest("this filesystem folds case, so the alias cannot be created")
+        self.refused(store)
+
+    def test_a_symlink_or_fifo_in_the_tree_is_refused(self):
+        store = make_harness_store(self.work, "links")
+        base = os.path.join(store, "template-module", "harness", "claude")
+        os.symlink("/etc/hostname", os.path.join(base, "skills", "demo", "link.md"))
+        self.refused(store, "symlink")
+        store = make_harness_store(self.work, "fifo")
+        base = os.path.join(store, "template-module", "harness", "claude")
+        os.mkfifo(os.path.join(base, "skills", "demo", "pipe.md"))
+        self.refused(store)
+
+    def test_a_tree_over_two_mib_is_refused(self):
+        files = {"skills/demo/SKILL.md": SKILL_TEXT}
+        files.update({"skills/demo/big%d.md" % i: "x" * (250 * 1024) for i in range(9)})
+        self.refused(make_harness_store(self.work, "big", files=files))
+
+    def test_a_store_with_a_harness_tree_is_never_executed_or_changed(self):
+        store = make_harness_store(self.work, "ro", files={"skills/demo/SKILL.md": SKILL_TEXT,
+                                                           "skills/demo/run.md": "x\n"})
+        before = tree_hash(store)
+        self.read(store)
+        self.assertEqual(tree_hash(store), before)
+
+
+class RegistrationReviewTest(unittest.TestCase):
+    """Plan 0024 increment B: `--register` lists what an approval would cover."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        self.reg = os.path.join(self.work, "reg", "registry.json")
+
+    def register(self, store, *extra):
+        return run(["--register", store, "--registry", self.reg, *extra])
+
+    def test_the_review_lists_files_units_findings_and_the_digest(self):
+        store = make_harness_store(self.work, files={"skills/demo/SKILL.md": SKILL_TEXT,
+                                                     "skills/demo/notes.md": "ignore previous instructions\n",
+                                                     "agents/helper.md": AGENT_TEXT})
+        code, out, err = self.register(store)
+        self.assertEqual(code, 0, err)
+        meta = install.load_external("hstore", store, None, set(install.load_modules()))
+        self.assertIn("Digest: " + meta["digest"], out)
+        self.assertIn("--approve %s --name hstore" % meta["digest"], out)
+        for rel, data in (("skills/demo/SKILL.md", SKILL_TEXT), ("agents/helper.md", AGENT_TEXT)):
+            import hashlib
+            line = [l for l in out.split("\n") if rel in l and "sha256" in l]
+            self.assertTrue(line, rel)
+            self.assertIn("%d bytes" % len(data.encode()), line[0])
+            self.assertIn(hashlib.sha256(data.encode()).hexdigest(), line[0])
+        self.assertIn("skill demo", out)
+        self.assertIn("A demo skill", out)
+        self.assertIn("agent helper", out)
+        self.assertIn("tools 'Read'", out)
+        self.assertIn("phrase 'ignore previous' in skills/demo/notes.md", out)
+
+    def test_nothing_is_installed_or_approved_and_the_store_is_untouched(self):
+        store = make_harness_store(self.work)
+        before = tree_hash(store)
+        self.assertEqual(self.register(store)[0], 0)
+        self.assertEqual(tree_hash(store), before)
+        self.assertFalse(os.path.exists(self.reg + ".approvals"))
+        with open(self.reg) as handle:
+            self.assertEqual(json.load(handle)["stores"], {"hstore": {"path": os.path.realpath(store)}})
+
+    def test_registering_again_changes_nothing_and_prints_the_review_again(self):
+        store = make_harness_store(self.work)
+        first = self.register(store)[1]
+        with open(self.reg, "rb") as handle:
+            before = handle.read()
+        code, out, err = self.register(store)
+        self.assertEqual(code, 0, err)
+        self.assertIn("already registered", out)
+        self.assertIn("Digest: ", out)
+        with open(self.reg, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+        self.assertEqual(out.split("Digest: ")[1].split()[0], first.split("Digest: ")[1].split()[0])
+
+    def test_dry_run_prints_the_review_and_writes_nothing(self):
+        store = make_harness_store(self.work)
+        code, out, err = self.register(store, "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Digest: ", out)
+        self.assertFalse(os.path.exists(self.reg))
+
+    def test_values_from_files_are_escaped_and_capped(self):
+        skill = "---\nname: demo\ndescription: " + "A" * 400 + "\u202e\u00e9\n---\nbody\n"
+        store = make_harness_store(self.work, files={"skills/demo/SKILL.md": skill})
+        code, out, err = self.register(store)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(all(ch == "\n" or 32 <= ord(ch) < 127 for ch in out), "non-ASCII in output")
+        self.assertNotIn("A" * 201, out)
+
+    def test_a_unit_named_like_a_built_in_unit_is_flagged_but_registers(self):
+        store = make_harness_store(self.work, files={
+            "skills/verilog-sby-formal/SKILL.md": "---\nname: verilog-sby-formal\n---\nx\n"})
+        code, out, err = self.register(store)
+        self.assertEqual(code, 0, err)
+        self.assertIn("also shipped by the built-in module formal", out)
+
+    def test_each_advisory_phrase_and_executable_files_are_reported(self):
+        phrases = ["ignore previous", "disregard", "allowed-tools", "hooks:", "mcpServers", "permissionMode",
+                   "bypassPermissions", "dangerously", "curl ", "wget ", "| sh", "sudo ", "rm -rf", "IGNORE PREVIOUS"]
+        for index, phrase in enumerate(phrases):
+            with self.subTest(phrase=phrase):
+                store = make_harness_store(self.work, "p%d" % index, files={
+                    "skills/demo/SKILL.md": SKILL_TEXT, "skills/demo/n.md": "text %s text\n" % phrase})
+                out = self.register(store, "--dry-run")[1]
+                self.assertIn("in skills/demo/n.md", out)
+        store = make_harness_store(self.work, "bang", files={"skills/demo/SKILL.md": SKILL_TEXT,
+                                                             "skills/demo/n.md": "ok\n!run it\n"})
+        self.assertIn("line starting with !", self.register(store, "--dry-run")[1])
+        store = make_harness_store(self.work, "exe")
+        os.chmod(os.path.join(store, "template-module", "harness", "claude", "skills", "demo", "SKILL.md"), 0o755)
+        self.assertIn("executable: skills/demo/SKILL.md", self.register(store, "--dry-run")[1])
+
+    def test_unit_keys_beyond_name_description_and_tools_are_flagged(self):
+        skill = "---\nname: demo\ndescription: d\nallowed-tools: Bash(*)\nhooks:\n  PreToolUse: x\n---\nbody\n"
+        store = make_harness_store(self.work, files={"skills/demo/SKILL.md": skill})
+        out = self.register(store, "--dry-run")[1]
+        self.assertIn("frontmatter key 'allowed-tools' in skills/demo/SKILL.md", out)
+        self.assertIn("frontmatter key 'hooks' in skills/demo/SKILL.md", out)
+        plain = make_harness_store(self.work, "plainfm")
+        self.assertNotIn("frontmatter key", self.register(plain, "--dry-run")[1])
+
+    def test_a_store_without_a_harness_tree_prints_no_harness_review(self):
+        store = make_store(self.work, "plain")
+        code, out, err = self.register(store)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Digest:", out)
+
+    def test_a_refused_store_is_not_registered_and_says_why(self):
+        store = make_harness_store(self.work, files={"settings.json": "{}"})
+        code, out, err = self.register(store)
+        self.assertEqual(code, 2)
+        self.assertIn("settings.json", err)
+        self.assertFalse(os.path.exists(self.reg))
+
+
+class StoreApprovalCommandsTest(unittest.TestCase):
+    """Plan 0024 increment C: the approvals file, --approve, --unapprove and --unregister."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        self.reg = os.path.join(self.work, "reg", "registry.json")
+        self.appr = self.reg + ".approvals"
+        self.store = make_harness_store(self.work)
+        self.assertEqual(self.cmd("--register", self.store)[0], 0)
+        self.digest = install.load_external("hstore", self.store, None, set(install.load_modules()))["digest"]
+
+    def cmd(self, *argv):
+        return run([*argv, "--registry", self.reg])
+
+    def approvals(self):
+        with open(self.appr) as handle:
+            return json.load(handle)
+
+    def approve(self, digest=None, name="hstore", *extra):
+        return self.cmd("--approve", digest or self.digest, "--name", name, *extra)
+
+    def test_approve_records_the_path_and_digest_beside_the_registry(self):
+        before = open(self.reg, "rb").read()
+        code, out, err = self.approve()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.approvals(), {"schema": 1, "approvals": {
+            "hstore": {"path": os.path.realpath(self.store), "digest": self.digest}}})
+        self.assertEqual(open(self.reg, "rb").read(), before)
+        self.assertEqual(os.stat(self.appr).st_mode & 0o777, 0o600)
+
+    def test_a_new_approval_replaces_the_old_one(self):
+        self.approve()
+        with open(os.path.join(self.store, "template-module", "harness", "claude", "skills", "demo", "SKILL.md"), "a") as h:
+            h.write("more\n")
+        new = install.load_external("hstore", self.store, None, set(install.load_modules()))["digest"]
+        self.assertEqual(self.approve(new)[0], 0)
+        self.assertEqual(self.approvals()["approvals"]["hstore"]["digest"], new)
+
+    def test_wrong_unregistered_changed_and_moved_stores_are_refused(self):
+        for label, argv in (
+            ("wrong digest", ("--approve", "0" * 64, "--name", "hstore")),
+            ("uppercase digest", ("--approve", self.digest.upper(), "--name", "hstore")),
+            ("short digest", ("--approve", self.digest[:10], "--name", "hstore")),
+            ("unregistered", ("--approve", self.digest, "--name", "nobody")),
+            ("no name", ("--approve", self.digest)),
+        ):
+            with self.subTest(label=label):
+                code, out, err = self.cmd(*argv)
+                self.assertEqual(code, 2)
+                self.assertFalse(os.path.exists(self.appr))
+        with open(os.path.join(self.store, "template-module", "slots", "agents-guidance.md"), "a") as handle:
+            handle.write("changed\n")
+        self.assertEqual(self.approve()[0], 2)
+        shutil.move(self.store, self.store + "-moved")
+        self.assertEqual(self.approve()[0], 2)
+        self.assertFalse(os.path.exists(self.appr))
+
+    def test_a_store_without_a_harness_tree_has_nothing_to_approve(self):
+        plain = make_store(self.work, "plain")
+        self.assertEqual(self.cmd("--register", plain)[0], 0)
+        digest = install.load_external("plain", plain, None, set(install.load_modules()))["digest"]
+        self.assertEqual(self.approve(digest, "plain")[0], 2)
+        self.assertFalse(os.path.exists(self.appr))
+
+    def test_unapprove_removes_only_the_approval(self):
+        self.approve()
+        code, out, err = self.cmd("--unapprove", "hstore")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.approvals()["approvals"], {})
+        self.assertIn("hstore", json.load(open(self.reg))["stores"])
+        code, out, err = self.cmd("--unapprove", "hstore")
+        self.assertEqual(code, 0)
+        self.assertIn("not approved", out)
+
+    def test_unregister_removes_the_approval_too_even_when_the_registry_lost_the_name(self):
+        self.approve()
+        code, out, err = self.cmd("--unregister", "hstore")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.approvals()["approvals"], {})
+        self.assertEqual(json.load(open(self.reg))["stores"], {})
+        self.assertEqual(self.cmd("--register", self.store)[0], 0)
+        self.assertEqual(self.approvals()["approvals"], {})
+        self.approve()
+        save = json.load(open(self.reg))
+        save["stores"] = {}
+        json.dump(save, open(self.reg, "w"))
+        code, out, err = self.cmd("--unregister", "hstore")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.approvals()["approvals"], {})
+
+    def test_unregister_removes_the_approval_before_the_registry_entry(self):
+        self.approve()
+        original = install.save_registry
+        def failing(path, stores):
+            raise install.InstallError("disk full")
+        install.save_registry = failing
+        self.addCleanup(setattr, install, "save_registry", original)
+        code, out, err = self.cmd("--unregister", "hstore")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.approvals()["approvals"], {})
+        self.assertIn("hstore", json.load(open(self.reg))["stores"])
+
+    def test_two_registries_in_one_directory_keep_separate_approvals(self):
+        other = os.path.join(self.work, "reg", "other.json")
+        self.assertEqual(run(["--register", self.store, "--registry", other])[0], 0)
+        self.approve()
+        self.assertFalse(os.path.exists(other + ".approvals"))
+        self.assertEqual(run(["--approve", self.digest, "--name", "hstore", "--registry", other])[0], 0)
+        self.assertEqual(self.approvals()["approvals"]["hstore"]["digest"], self.digest)
+        self.assertTrue(os.path.exists(other + ".approvals"))
+
+    def test_a_registry_named_like_an_approvals_file_is_refused(self):
+        for suffix in ("", "/", "/.", "/../" + os.path.basename(self.appr)):
+          for argv in (["--list"], ["--register", self.store], ["--unregister", "x"]):
+            with self.subTest(argv=argv, suffix=suffix):
+                code, out, err = run([*argv, "--registry", self.appr + suffix])
+                self.assertEqual(code, 2)
+                self.assertIn(".approvals", err)
+
+    def test_other_options_and_a_target_are_refused(self):
+        for extra in (["--harness", "claude"], ["--with", "cad"], ["--add", "cad"], ["--update"],
+                      ["--git-name", "x"], ["--merge"], ["--skip-unsafe-entries"], [os.path.join(self.work, "t")],
+                      ["--list"], ["--register", self.store]):
+            for verb in (["--approve", self.digest, "--name", "hstore"], ["--unapprove", "hstore"]):
+                with self.subTest(extra=extra, verb=verb[0]):
+                    code, out, err = self.cmd(*verb, *extra)
+                    self.assertEqual(code, 2)
+                    self.assertFalse(os.path.exists(self.appr))
+
+    def test_dry_run_writes_nothing(self):
+        code, out, err = self.approve(None, "hstore", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Would approve", out)
+        self.assertFalse(os.path.exists(self.appr))
+        self.approve()
+        before = open(self.appr, "rb").read()
+        self.assertEqual(self.cmd("--unapprove", "hstore", "--dry-run")[0], 0)
+        self.assertEqual(self.cmd("--unregister", "hstore", "--dry-run")[0], 0)
+        self.assertEqual(open(self.appr, "rb").read(), before)
+
+    def test_a_hostile_approvals_file_is_refused_and_never_echoed(self):
+        good = {"path": os.path.realpath(self.store), "digest": self.digest}
+        cases = {
+            "not json": "{",
+            "not object": "[]",
+            "wrong schema": {"schema": 2, "approvals": {}},
+            "bool schema": {"schema": True, "approvals": {}},
+            "extra key": {"schema": 1, "approvals": {}, "x": 1},
+            "approvals not object": {"schema": 1, "approvals": []},
+            "invalid name": {"schema": 1, "approvals": {"Bad Name": good}},
+            "relative path": {"schema": 1, "approvals": {"hstore": dict(good, path="rel")}},
+            "multiline path": {"schema": 1, "approvals": {"hstore": dict(good, path="/a\nb")}},
+            "bad digest": {"schema": 1, "approvals": {"hstore": dict(good, digest="SECRETVALUE")}},
+            "extra entry key": {"schema": 1, "approvals": {"hstore": dict(good, extra=1)}},
+            "entry not object": {"schema": 1, "approvals": {"hstore": "SECRETVALUE"}},
+        }
+        for label, content in cases.items():
+            with self.subTest(label=label):
+                with open(self.appr, "w") as handle:
+                    handle.write(content if isinstance(content, str) else json.dumps(content))
+                for argv in (("--approve", self.digest, "--name", "hstore"), ("--unapprove", "hstore"),
+                             ("--unregister", "hstore")):
+                    code, out, err = self.cmd(*argv)
+                    self.assertEqual(code, 2, argv)
+                    self.assertNotIn("SECRETVALUE", err + out)
+                    self.assertIn(".approvals", err)
+                self.assertEqual(self.cmd("--list")[0], 0)
+                self.assertIn("hstore", json.load(open(self.reg))["stores"])
+
+    def test_a_symlinked_or_special_or_oversized_approvals_file_is_refused(self):
+        outside = os.path.join(self.work, "elsewhere")
+        with open(outside, "w") as handle:
+            handle.write('{"schema": 1, "approvals": {}}')
+        os.symlink(outside, self.appr)
+        self.assertEqual(self.approve()[0], 2)
+        os.unlink(self.appr)
+        os.mkfifo(self.appr)
+        self.assertEqual(self.approve()[0], 2)
+        os.unlink(self.appr)
+        with open(self.appr, "w") as handle:
+            handle.write(" " * (install.MAX_REGISTRY_BYTES + 1))
+        self.assertEqual(self.approve()[0], 2)
+
+    def test_a_symlinked_registry_directory_is_refused_for_approvals(self):
+        real = os.path.join(self.work, "realreg")
+        shutil.copytree(os.path.dirname(self.reg), real)
+        link = os.path.join(self.work, "linkreg")
+        os.symlink(real, link)
+        code, out, err = run(["--approve", self.digest, "--name", "hstore", "--registry", os.path.join(link, "registry.json")])
+        self.assertEqual(code, 2)
+
+
+class StoreCase(unittest.TestCase):
+    """A registered harness store, a project target and the verbs, shared by the store tests."""
+
+    BLOCK = "BEGIN module:hstore slot:agents-guidance"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.work = self.tmp.name
+        self.saved = dict(os.environ)
+        os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+        os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.work, "xdg")
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self.saved)))
+        self.reg = os.path.join(self.work, "reg", "registry.json")
+        self.appr = self.reg + ".approvals"
+        self.store = make_harness_store(self.work)
+        self.assertEqual(run(["--register", self.store, "--registry", self.reg])[0], 0)
+        self.target = os.path.join(self.work, "proj")
+
+    def digest(self, store=None, name="hstore"):
+        return install.load_external(name, store or self.store, None, set(install.load_modules()))["digest"]
+
+    def approve(self, name="hstore", store=None):
+        code, out, err = run(["--approve", self.digest(store, name), "--name", name, "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+
+    def new(self, with_="hstore", target=None, *extra):
+        return run([target or self.target, "--with", with_, "--registry", self.reg, "--git-name", "T",
+                    "--git-email", "t@users.noreply.example.invalid", *extra])
+
+    def add(self, what="hstore", *extra):
+        return run(["--add", what, "--dir", self.target, "--registry", self.reg, *extra])
+
+    def update(self, *names):
+        return run(["--update", *names, "--dir", self.target, "--registry", self.reg])
+
+    def read(self, rel):
+        with open(os.path.join(self.target, rel)) as handle:
+            return handle.read()
+
+    def edit_store(self, rel="slots/agents-guidance.md"):
+        with open(os.path.join(self.store, "template-module", *rel.split("/")), "a") as handle:
+            handle.write("changed\n")
+
+
+class StoreVerbTableTest(StoreCase):
+    """Plan 0024 increment D: which verbs need a matching approval, and what they do without one."""
+
+    def test_new_is_refused_before_any_write_without_an_approval(self):
+        code, out, err = self.new()
+        self.assertEqual(code, 2)
+        self.assertIn("--register", err)
+        self.assertIn("--approve", err)
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_new_works_with_the_current_approval(self):
+        self.approve()
+        code, out, err = self.new()
+        self.assertEqual(code, 0, err)
+        self.assertIn(self.BLOCK, self.read("AGENTS.md"))
+
+    def test_each_kind_of_stale_or_foreign_approval_authorises_nothing(self):
+        self.approve()
+        for label, change in (
+            ("slot", lambda: self.edit_store("slots/agents-guidance.md")),
+            ("module.json", lambda: open(os.path.join(self.store, "template-module", "module.json"), "a").write(" ")),
+            ("harness file", lambda: self.edit_store("harness/claude/skills/demo/SKILL.md")),
+        ):
+            with self.subTest(label=label):
+                change()
+                code, out, err = self.new()
+                self.assertEqual(code, 2)
+                self.assertFalse(os.path.exists(self.target))
+                self.assertEqual(self.add_attempt(), 2)
+                self.approve()  # approve the changed store so the next case starts from a valid state
+        # the approval of the same path under another name authorises nothing
+        with open(self.appr, "w") as handle:
+            json.dump({"schema": 1, "approvals": {"other": {"path": os.path.realpath(self.store),
+                                                            "digest": self.digest()}}}, handle)
+        self.assertEqual(self.new()[0], 2)
+
+    def add_attempt(self):
+        fresh = os.path.join(self.work, "addproj")
+        if not os.path.exists(fresh):
+            self.assertEqual(run([fresh, "--registry", self.reg, "--git-name", "T",
+                                  "--git-email", "t@users.noreply.example.invalid"])[0], 0)
+        return run(["--add", "hstore", "--dir", fresh, "--registry", self.reg])[0]
+
+    def test_an_approval_for_another_path_authorises_nothing(self):
+        self.approve()
+        data = json.load(open(self.appr))
+        data["approvals"]["hstore"]["path"] = self.work
+        json.dump(data, open(self.appr, "w"))
+        self.assertEqual(self.new()[0], 2)
+
+    def test_a_typed_path_must_be_registered_at_that_path_and_approved(self):
+        unregistered = make_harness_store(self.work, "free")
+        self.assertEqual(self.new("free=" + unregistered)[0], 2)
+        self.assertEqual(self.new("hstore=" + self.store)[0], 2)  # registered, not approved
+        self.approve()
+        self.assertEqual(self.new("hstore=" + self.store)[0], 0)
+        other = make_harness_store(self.work, "hstore2")
+        self.assertEqual(self.new("hstore=" + other, os.path.join(self.work, "p2"))[0], 2)
+
+    def test_an_approval_counts_only_while_the_registry_holds_the_name_at_that_path(self):
+        self.approve()
+        registry = json.load(open(self.reg))
+        other = make_harness_store(self.work, "elsewhere")
+        for label, stores in (("name gone", {}),
+                              ("name elsewhere", {"hstore": {"path": os.path.realpath(other)}})):
+            with self.subTest(label=label):
+                json.dump(dict(registry, stores=stores), open(self.reg, "w"))
+                code, out, err = self.new("hstore=" + self.store, os.path.join(self.work, "t-" + label.replace(" ", "")))
+                self.assertEqual(code, 2)
+                self.assertFalse(os.path.exists(os.path.join(self.work, "t-" + label.replace(" ", ""))))
+
+    def test_add_of_a_new_store_needs_the_approval_too(self):
+        self.assertEqual(self.new("")[0], 0)
+        self.assertEqual(self.add()[0], 2)
+        self.assertNotIn(self.BLOCK, self.read("AGENTS.md"))
+        self.approve()
+        self.assertEqual(self.add()[0], 0)
+        self.assertIn(self.BLOCK, self.read("AGENTS.md"))
+
+    def test_add_of_an_installed_name_reads_nothing(self):
+        self.approve()
+        self.assertEqual(self.new()[0], 0)
+        shutil.move(self.store, self.store + "-gone")
+        os.unlink(self.appr)
+        os.unlink(self.reg)
+        code, out, err = self.add()
+        self.assertEqual(code, 0, err)
+        self.assertIn("already installed", out)
+
+    def test_a_full_update_skips_a_changed_store_and_keeps_its_record(self):
+        self.approve()
+        self.assertEqual(self.new()[0], 0)
+        manifest = self.read(".template-manifest")
+        agents = self.read("AGENTS.md")
+        self.edit_store("slots/agents-guidance.md")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("hstore", out)
+        self.assertIn("approv", out)
+        self.assertEqual(self.read(".template-manifest"), manifest)
+        self.assertEqual(self.read("AGENTS.md"), agents)
+
+    def test_a_full_update_delivers_a_change_once_it_is_approved(self):
+        self.approve()
+        self.assertEqual(self.new()[0], 0)
+        self.edit_store("slots/agents-guidance.md")
+        self.approve()
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("changed", self.read("AGENTS.md"))
+        self.assertEqual(json.loads(self.read(".template-manifest"))["external_modules"]["hstore"]["digest"],
+                         self.digest())
+
+    def test_a_named_update_is_refused_before_any_write_when_unapproved_or_changed(self):
+        self.approve()
+        self.assertEqual(self.new()[0], 0)
+        self.edit_store("slots/agents-guidance.md")
+        before = tree_hash(self.target)
+        for argv in (("hstore",), ("hstore=" + self.store,)):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.update(*argv)[0], 2)
+                self.assertEqual(tree_hash(self.target), before)
+        self.approve()
+        self.assertEqual(self.update("hstore")[0], 0)
+
+    def test_remove_needs_no_store_registry_or_approvals(self):
+        self.approve()
+        self.assertEqual(self.new()[0], 0)
+        shutil.move(self.store, self.store + "-gone")
+        with open(self.appr, "w") as handle:
+            handle.write("{")
+        os.unlink(self.reg)
+        code, out, err = run(["--remove", "hstore", "--dir", self.target, "--registry", self.reg])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(self.BLOCK, self.read("AGENTS.md"))
+
+    def test_a_store_without_a_harness_tree_needs_no_approval_anywhere(self):
+        plain = make_store(self.work, "plain3", module=STORE3)
+        target = os.path.join(self.work, "p3")
+        self.assertEqual(run([target, "--with", "plain3=" + plain, "--registry", self.reg, "--git-name", "T",
+                              "--git-email", "t@users.noreply.example.invalid"])[0], 0)
+        self.assertEqual(run(["--update", "plain3=" + plain, "--dir", target, "--registry", self.reg])[0], 0)
+        self.assertEqual(run(["--update", "--dir", target, "--registry", self.reg])[0], 0)
+
+    def test_a_hostile_approvals_file_blocks_only_the_verbs_that_need_it(self):
+        with open(self.appr, "w") as handle:
+            handle.write("{")
+        self.assertEqual(self.new()[0], 2)
+        self.assertFalse(os.path.exists(self.target))
+        plain = make_store(self.work, "plain3", module=STORE3)
+        self.assertEqual(run(["--register", plain, "--registry", self.reg])[0], 0)
+        self.assertEqual(self.new("plain3", os.path.join(self.work, "pp"))[0], 0)
+        self.assertEqual(run(["--list", "--registry", self.reg])[0], 0)
+
+
+class StoreInstallTest(StoreCase):
+    """Plan 0024 increment E: approved store harness files install, update, remove and report like a module's."""
+
+    SKILL_FILE = ".claude/skills/demo/SKILL.md"
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def test_an_approved_store_installs_its_files_under_the_harness_and_records_the_supplier(self):
+        self.approve()
+        code, out, err = self.new("hstore", None, "--name", "proj", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(self.SKILL_FILE), SKILL_TEXT.replace("REPLACE_WITH_PROJECT_NAME", "proj"))
+        entry = self.manifest()["harness_files"][self.SKILL_FILE]
+        self.assertEqual(entry["modules"], ["hstore"])
+        mode = os.stat(os.path.join(self.target, self.SKILL_FILE)).st_mode & 0o777
+        umask = os.umask(0)
+        os.umask(umask)
+        self.assertEqual(mode, 0o644 & ~umask)
+
+    def test_without_the_harness_option_only_the_neutral_part_installs(self):
+        self.approve()
+        self.assertEqual(self.new()[0], 0)
+        self.assertIn(self.BLOCK, self.read("AGENTS.md"))
+        self.assertFalse(os.path.exists(os.path.join(self.target, ".claude")))
+        self.assertNotIn("harness", self.manifest())
+
+    def test_module_placeholders_are_replaced_in_one_pass(self):
+        skill = ("---\nname: demo\n---\nname REPLACE_WITH_MODULE_NAME path REPLACE_WITH_MODULE_PATH "
+                 "project REPLACE_WITH_PROJECT_NAME\n")
+        store = make_harness_store(self.work, "pstore", files={"skills/demo/SKILL.md": skill})
+        self.assertEqual(run(["--register", store, "--registry", self.reg])[0], 0)
+        self.approve("pstore", store)
+        code, out, err = self.new("pstore", None, "--name", "REPLACE_WITH_MODULE_NAME", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        text = self.read(self.SKILL_FILE)
+        self.assertIn("name pstore path ../pstore project REPLACE_WITH_MODULE_NAME", text)
+
+    def test_a_placeholder_with_an_unsafe_value_is_refused_before_any_write(self):
+        skill = "---\nname: demo\n---\npath REPLACE_WITH_MODULE_PATH\n"
+        store = make_harness_store(self.work, "dollar", files={"skills/demo/SKILL.md": skill})
+        store_odd = os.path.join(self.work, "odd$dir")
+        shutil.move(store, store_odd)
+        self.assertEqual(run(["--register", store_odd, "--name", "odd", "--registry", self.reg])[0], 0)
+        self.approve("odd", store_odd)
+        self.assertEqual(self.new("odd", None, "--harness", "claude")[0], 2)
+        self.assertFalse(os.path.exists(self.target))
+        self.approve()
+        code, out, err = self.new("hstore", None, "--name", 'a"b', "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target))
+
+    def other_store(self, name, files):
+        store = make_harness_store(self.work, name, files=files)
+        self.assertEqual(run(["--register", store, "--registry", self.reg])[0], 0)
+        self.approve(name, store)
+        return store
+
+    def test_identical_skills_from_two_stores_install_once_with_both_suppliers(self):
+        self.approve()
+        self.other_store("twin", {"skills/demo/SKILL.md": SKILL_TEXT})
+        code, out, err = self.new("hstore,twin", None, "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.manifest()["harness_files"][self.SKILL_FILE]["modules"], ["hstore", "twin"])
+
+    def test_differing_skills_from_two_stores_in_one_run_fail_the_run(self):
+        self.approve()
+        self.other_store("twin", {"skills/demo/SKILL.md": SKILL_TEXT + "different\n"})
+        code, out, err = self.new("hstore,twin", None, "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target))
+
+    def test_a_later_differing_store_is_a_conflict_and_is_skipped(self):
+        self.approve()
+        self.assertEqual(self.new("hstore", None, "--harness", "claude")[0], 0)
+        self.other_store("twin", {"skills/demo/SKILL.md": SKILL_TEXT + "different\n"})
+        code, out, err = self.add("twin", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict", out)
+        self.assertEqual(self.read(self.SKILL_FILE), SKILL_TEXT.replace("REPLACE_WITH_PROJECT_NAME", "proj"))
+        self.assertNotIn("twin", self.manifest()["harness_files"][self.SKILL_FILE]["modules"])
+
+    def test_a_store_unit_named_like_a_built_in_unit_follows_the_normal_collision_rules(self):
+        skill = "---\nname: verilog-sby-formal\n---\nmine\n"
+        self.other_store("clash", {"skills/verilog-sby-formal/SKILL.md": skill})
+        code, out, err = self.new("formal,clash", None, "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target))
+        self.assertEqual(self.new("formal", None, "--harness", "claude")[0], 0)
+        code, out, err = self.add("clash")
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict", out)
+
+    def test_a_changed_but_approved_store_is_delivered_by_update(self):
+        self.approve()
+        self.assertEqual(self.new("hstore", None, "--name", "proj", "--harness", "claude")[0], 0)
+        self.edit_store("harness/claude/skills/demo/SKILL.md")
+        self.approve()
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("changed", self.read(self.SKILL_FILE))
+        self.assertEqual(self.manifest()["external_modules"]["hstore"]["digest"], self.digest())
+
+    def test_a_changed_unapproved_store_leaves_its_files_alone(self):
+        self.approve()
+        self.assertEqual(self.new("hstore", None, "--name", "proj", "--harness", "claude")[0], 0)
+        before = self.read(self.SKILL_FILE)
+        self.edit_store("harness/claude/skills/demo/SKILL.md")
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(self.read(self.SKILL_FILE), before)
+
+    def test_activation_names_an_earlier_store_and_a_named_update_installs_it(self):
+        self.approve()
+        self.assertEqual(self.new()[0], 0)
+        code, out, err = self.add("hstore", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("hstore", out.split("Adding modules")[0])
+        self.assertFalse(os.path.exists(os.path.join(self.target, self.SKILL_FILE)))
+        self.assertIn("hstore", out)
+        code, out, err = self.update("hstore")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.exists(os.path.join(self.target, self.SKILL_FILE)))
+        self.assertEqual(self.manifest()["harness_files"][self.SKILL_FILE]["modules"], ["hstore"])
+
+    def test_activation_note_names_only_stores_installed_earlier(self):
+        self.approve()
+        self.assertEqual(self.new("")[0], 0)
+        code, out, err = self.add("hstore", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("were not read", out)
+        self.assertTrue(os.path.exists(os.path.join(self.target, self.SKILL_FILE)))
+
+    def test_remove_deletes_unedited_store_files_and_keeps_edited_ones(self):
+        self.approve()
+        self.assertEqual(self.new("hstore", None, "--harness", "claude")[0], 0)
+        self.assertEqual(run(["--remove", "hstore", "--dir", self.target])[0], 0)
+        self.assertFalse(os.path.exists(os.path.join(self.target, self.SKILL_FILE)))
+        self.assertNotIn(self.SKILL_FILE, self.manifest().get("harness_files", {}))
+        self.assertEqual(self.new("hstore", os.path.join(self.work, "p2"), "--harness", "claude")[0], 0)
+        with open(os.path.join(self.work, "p2", self.SKILL_FILE), "a") as handle:
+            handle.write("mine\n")
+        self.assertEqual(run(["--remove", "hstore", "--dir", os.path.join(self.work, "p2")])[0], 0)
+        self.assertTrue(os.path.exists(os.path.join(self.work, "p2", self.SKILL_FILE)))
+
+    def test_declarations_of_a_format_3_store_are_reported(self):
+        module = json.dumps({"module_format": 3, "description": "d", "helpers": ["no-such-helper-xyz"],
+                             "workers": {"extract": "extracts things", "other": "x"}, "global_config": True}).encode()
+        store = make_harness_store(self.work, "decl", module=module, files={
+            "skills/demo/SKILL.md": SKILL_TEXT, "agents/ext.md": "---\nname: ext\n---\nx\n",
+            "harness.json": '{"roles": {"extract": "agents/ext.md"}}'})
+        self.assertEqual(run(["--register", store, "--registry", self.reg])[0], 0)
+        self.approve("decl", store)
+        code, out, err = self.new("decl", None, "--harness", "claude", "--global-config", self.work)
+        self.assertEqual(code, 0, err)
+        self.assertIn("decl: helper no-such-helper-xyz: missing", out)
+        self.assertIn("decl: worker extract: implemented by decl", out)
+        self.assertIn("decl: warning: claude does not implement worker other", out)
+        self.assertIn("decl: global configuration: missing", out)
+
+    def test_a_store_never_installs_anything_outside_the_harness_unit_paths(self):
+        self.approve()
+        self.assertEqual(self.new("hstore", None, "--harness", "claude")[0], 0)
+        installed = sorted(self.manifest()["harness_files"])
+        self.assertTrue(all(path.startswith(".claude/") or path in ("CLAUDE.md",) for path in installed), installed)
 
 
 class HarnessPilotTest(ProjectCase):

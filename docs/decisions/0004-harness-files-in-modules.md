@@ -153,7 +153,7 @@ ADR 0008, which keeps the starter tool-neutral.
 
 ## Verification
 
-Not implemented; the specification is approved and fixes the points below. The roadmap [module-harness-files](../roadmaps/module-harness-files.md) orders the
+Implemented for built-in modules, declarations, the Graphify tooling, the base harness files and external stores with registration review and approval (plans 0018 to 0024); the knowledge-base stores and the global-configuration cleanup remain (roadmap candidates 9 and 10). The specification is approved and fixes the points below. The roadmap [module-harness-files](../roadmaps/module-harness-files.md) orders the
 plans; each records its own evidence. The ADR fixes the contract's rules (selection, collision,
 approval binding and re-checking, fail-closed refusal by older installers, untrusted reads). The
 specification fixes names, shapes and numbers only: the harness root table and the refusal of an

@@ -107,7 +107,7 @@ a module for it.
 the global copy and rewording the global `CLAUDE.md` routing rule are separate work in
 `claude_global_config`.
 
-### 8. External stores: registration review
+### 8. External stores: registration review (done 2026-10-19, plan 0024)
 
 **Outcome:** a store may ship `template-module/harness/<name>/`; `--register` lists the files, the
 digest and static findings; `--approve <digest>` records approval; only matching files install; a
@@ -115,8 +115,7 @@ changed store is refused until approved again; identical skills install once and
 refused. Security-reviewed adversarially.
 **Dependencies:** 2, 4.
 **Boundary:** no model call and no network access by the installer.
-**Promotion trigger:** candidate 4 complete and the owner asks for store-shipped harness files. Met. Promoted 2026-10-19: the plan is drafted in
-`docs/plans/next.md` and waits for review and the owner's approval.
+**Promotion trigger:** candidate 4 complete and the owner asks for store-shipped harness files. Met. Promoted 2026-10-19 and implemented as plan 0024.
 
 ### 9. Knowledge-base stores
 

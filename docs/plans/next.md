@@ -1,6 +1,6 @@
 # External stores: harness files under registration review
 
-Status: Approved
+Status: Complete
 Created: 2026-10-19
 
 ## Goal
@@ -253,5 +253,42 @@ Completion: no unresolved Critical or High finding, mutation survivors explained
 
 ## Result
 
-<!-- Complete this only after verification. Archive the plan according to
-docs/plans/README.md, then reset this file to the empty template. -->
+Increments A to G are implemented and verified; nothing is committed beyond the approved plan.
+
+- **Format 3 stores (A):** `MODULE_FORMATS = (1, 2, 3)`; declarations and `harness/claude/` for format 3 only; a
+  `harness/` entry in format 1 or 2, a symlinked `harness/`, or an unknown harness directory is refused. The strict
+  store tree rules (ASCII components, `.md` files, unit shapes, exact frontmatter grammar with a single-line
+  `name`, no control characters or Unicode line separators, no `root/`, no `remote-runner.toml`) run before the
+  digest. The digest frames `module.json`, the slots and every harness file by UTF-8 path; a literal for a fixed
+  fixture is asserted and was computed outside `install.py`.
+- **Review (B):** `--register` (also a repeat and `--dry-run`) prints each file with size and SHA-256, each unit's
+  name, description and tools, findings (executable bit, advisory phrases, a line starting with `!`, a unit name
+  also shipped by a built-in module, frontmatter keys other than `name`, `description` and `tools`), the digest and
+  the `--approve` line; every value is ASCII-escaped and capped.
+- **Approvals (C):** `<registry>.approvals` with the registry's hardened read and write; `--approve DIGEST --name`,
+  `--unapprove`, `--unregister` removing the approval first; the option matrix; a `--registry` ending in
+  `.approvals` is refused after path normalisation.
+- **Verb table (D) and install (E):** `require_approvals` gates `--new`, `--add` and a named `--update` before any
+  write; a full `--update` skips a changed or unapproved store with a note; `--remove` and `--add` of an installed
+  name read no store, registry or approvals file; approved store trees install through `prepare_harness` with the
+  supplier recorded, collision rules unchanged, placeholders filled in one pass, a changed-but-approved digest
+  delivered by `--update`, and declarations reported.
+- **Docs (F):** README "Harness files in a store", ADR 0004 Verification, roadmap candidate 8.
+- **Verification (G):** 740 tests pass (`python3 -I -m unittest discover -s tests`), `git diff --check` clean. A
+  scratch run registered, approved, installed, edited the store and saw each refusal. An installer from
+  `10bdbe1` refuses a format 3 store and a project that records one (`malformed external_modules entry`) and
+  leaves the project unchanged. Fifteen mutations on scratch copies: fourteen killed; the survivor (registry
+  binding of an approval) got a new test and is now killed. Adversarial review by `security-reviewer`: no
+  Critical, High or Medium finding; one Low (a trailing `/` or `/.` bypassed the `.approvals` registry guard) and
+  Info items fixed with failing-first tests (name continuation lines, U+2028 and U+2029, flagged extra frontmatter
+  keys, a misleading activation note).
+- **Choices and interpretations:** the module path placeholder accepts `[A-Za-z0-9._/ -]` (the spec's
+  `[A-Za-z0-9._ -]` pattern has no `/`, which a store path needs); a hostile project name is refused only when a
+  harness file uses a project placeholder; `--approve` refuses a store with no `harness/` tree.
+- **Unchecked or accepted:** `--merge` with stores; a case-sensitive filesystem for the case-alias test (skipped
+  here); whether a real harness reads a name continuation or `hooks:` in frontmatter differently from the
+  installer's grammar (only the owner's reading of the files guards that); a concurrent local attacker swapping a
+  store or the approvals file (accepted residual in the specification).
+- **Not done here:** knowledge-base stores and the global configuration cleanup (candidates 9 and 10).
+- **Next action:** commit on request, then archive as plan 0024; candidate 9 waits for the knowledge-base skills
+  roadmap in `claude_knowledge_base` and `claude_global_config`.

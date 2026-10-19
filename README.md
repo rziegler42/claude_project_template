@@ -154,7 +154,9 @@ out of a project created by the installer. It never commits.
 ## Use a standalone project as a module
 
 A standalone project can ship a `template-module/` descriptor and be installed as
-an external module. It contributes slot fragments only, never files. Name it by
+an external module. It contributes slot fragments only, never `files/`, and, from
+`module_format` 3, harness files under approval (see
+[Harness files in a store](#harness-files-in-a-store)). Name it by
 path for one run, or register it once on this machine:
 
 ```sh
@@ -178,7 +180,7 @@ path for one run, or register it once on this machine:
   of its descriptor under `external_modules`.
 - External modules install after the built-in ones. `--add` of a name already in
   the manifest reports it as installed and reads nothing.
-- `--unregister` removes only the registry entry. Projects keep their blocks.
+- `--unregister` removes the registry entry and the store's approval, if any. Projects keep their blocks.
 
 The descriptor format, rules, and trust model are in
 `docs/specs/external-modules.md`, `docs/decisions/0002-installer-trust-model.md`,
@@ -192,7 +194,7 @@ A store contains `template-module/module.json` and `template-module/slots/<slot>
 { "module_format": 1, "description": "One line, 1-200 characters", "hint": "optional next step" }
 ```
 
-- `module_format` must be 1 or 2. There is no `name`, `order`, `requires` or
+- `module_format` must be 1, 2 or 3. There is no `name`, `order`, `requires` or
   `harness` key; unknown keys are errors. Format 2 additionally allows the optional
   `type`, `paths` and `data` keys described under "Module info"; format 1 rejects
   them. A store that uses them needs an installer that knows format 2: an older one
@@ -203,6 +205,44 @@ A store contains `template-module/module.json` and `template-module/slots/<slot>
   `BEGIN module:` or `END module:`, and its text must be tool-neutral.
 - `REPLACE_WITH_MODULE_NAME` and `REPLACE_WITH_MODULE_PATH` are filled in. The path
   is specific to one checkout, so a fragment that uses it should say so.
+
+### Harness files in a store
+
+A `module_format` 3 store may ship `template-module/harness/claude/` with skills, agents and
+commands, and may declare `helpers`, `workers` and `global_config` like a built-in module.
+Skills, agents and commands are instructions the harness loads on its own, so they install
+only after you approve exactly what they are:
+
+```sh
+./install.py --register ~/projects/my_kb          # lists every file, its SHA-256, each unit's name,
+                                                  # description and tools, findings, and the digest
+./install.py --approve <digest> --name my_kb      # after you have read those files
+./install.py ../my-project --with my_kb --harness claude
+./install.py --unapprove my_kb                    # or --unregister my_kb, which also removes it
+```
+
+- Shape: `skills/<name>/SKILL.md` (other `.md` files may sit beside it), `agents/<name>.md`
+  and `commands/<name>.md`, each with plain `---` frontmatter whose `name` equals `<name>`.
+  Only ASCII path components, `.md` files, UTF-8 text without control characters, at most 128
+  files, 256 KiB per file and 2 MiB per store. A store has no `CLAUDE.md`, `settings`, hooks,
+  MCP configuration or scripts; anything else is refused when the store is registered.
+- The digest covers `module.json`, every fragment and every harness file as stored. Approval
+  is recorded in `registry.json.approvals`, beside the registry, bound to the store's real path
+  and that digest. `--new` and `--add` refuse a store whose harness files are not approved or
+  whose digest changed since. A named `--update` refuses it; a full `--update` skips it with a
+  note and leaves what it installed. `--remove` needs no approval and reads no store.
+- The installer runs no model, no program from a store and no network call. The findings in the
+  listing (executable files, phrases such as `ignore previous` or `curl `) are advisory and
+  easily bypassed: read the files yourself. Approval guards new installs only; files already
+  copied into a project do not change when the store does.
+- Placeholders in a harness file (`REPLACE_WITH_PROJECT_NAME`, `REPLACE_WITH_PROJECT_ID`,
+  `REPLACE_WITH_MODULE_NAME`, `REPLACE_WITH_MODULE_PATH`) are filled in one pass, and a project
+  name or store path with unusual characters is refused rather than written into an approved file.
+- Two stores shipping the same skill install it once when identical; when they differ the run
+  fails if both are in it, otherwise the later store's unit is reported as a conflict and skipped.
+  An installer from before this version refuses a project that records a format 3 store.
+
+The rules are in [the specification](docs/specs/module-harness-files.md).
 
 ## Security notes
 
@@ -395,8 +435,8 @@ modules/<name>/harness/claude/
   installs the `graphify-workflow` skill and the `graphify-semantic` agent (see
   [Graphify tooling](#graphify-tooling)). For a project that already has one of them,
   `install.py --add <module> --harness claude --dir <project>` records the harness and
-  installs the files. External stores and their approval are not
-  implemented. The decision is
+  installs the files. A registered external store may ship harness files too, after you approve
+  them (see [Harness files in a store](#harness-files-in-a-store)). The decision is
   [ADR 0004](docs/decisions/0004-harness-files-in-modules.md) and the rules are in
   [the specification](docs/specs/module-harness-files.md).
 
