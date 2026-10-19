@@ -55,7 +55,8 @@ cover the harness files like other module files. Built-in modules only.
 **Boundary:** no declarations and no external stores yet. The plan also carries the specification's
 `write_tree` mode change (every harness write `0644 & ~umask`), the `schema` 2 manifest and the
 `harness_files` record, which every later candidate builds on.
-**Promotion trigger:** candidate 1 complete. Met; waits for the owner to promote it.
+**Promotion trigger:** candidate 1 complete. Met. Promoted 2026-10-19: the plan is drafted in
+`docs/plans/next.md` and waits for the owner's approval.
 
 ### 3. Pilot: `cad-freecad` and `freecad-scripts`
 
