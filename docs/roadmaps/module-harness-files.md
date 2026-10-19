@@ -125,7 +125,8 @@ configuration's ADR 0008 are superseded for harness directories.
 **Dependencies:** 8.
 **Boundary:** coordinated with `claude_knowledge_base` and `claude_global_config`; the in-progress
 knowledge-base skills roadmap there is reviewed first.
-**Promotion trigger:** candidate 8 complete.
+**Promotion trigger:** candidate 8 complete. Met. Promoted 2026-10-19; no plan is drafted in this
+repository, because the work lives in `claude_knowledge_base` and `claude_global_config`.
 
 ### 10. Global configuration cleanup
 
