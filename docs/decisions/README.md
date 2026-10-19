@@ -8,3 +8,4 @@ lifecycle and format in `base/docs/decisions/README.md`.
 | [0001](0001-module-and-slot-architecture.md) | Module and slot architecture for the project template | Accepted |
 | [0002](0002-installer-trust-model.md) | Installer trust model and hardening | Accepted |
 | [0003](0003-external-module-mechanism.md) | External module mechanism | Accepted |
+| [0004](0004-harness-files-in-modules.md) | Harness files in modules | Proposed |
