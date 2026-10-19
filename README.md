@@ -230,7 +230,9 @@ the trust model, mitigations, and accepted residuals. In practice:
   - `module.json` — `description`, `requires`, `order`, optional `harness`,
     and optional `hint` (one printable line, at most 200 characters) that the
     installer prints under "Next steps" after a new install or `--add`, and
-    optional `type`, `paths` and `data` (see [Module info](#module-info)).
+    optional `type`, `paths` and `data` (see [Module info](#module-info)), and
+    optional `helpers`, `workers` and `global_config` (see
+    [Declared dependencies](#declared-dependencies)).
   - `files/` — copied verbatim to the same relative path.
   - `harness/<harness>/` — files for one harness (`claude`), installed into that
     harness's directory only when a project records the harness (see
@@ -381,10 +383,47 @@ modules/<name>/harness/claude/
   nothing), so update the template checkout before running it on such a project.
 - `cad-freecad` is the first module to ship harness files: with `--harness claude` it
   installs the `freecad-scripts` skill (a `SKILL.md`, ten references and a mesh script)
-  into `.claude/skills/freecad-scripts/`. Helper and worker declarations, external
-  stores and their approval are not implemented. The decision is
+  into `.claude/skills/freecad-scripts/`. External stores and their approval are not
+  implemented. The decision is
   [ADR 0004](docs/decisions/0004-harness-files-in-modules.md) and the rules are in
   [the specification](docs/specs/module-harness-files.md).
+
+## Declared dependencies
+
+A built-in module's harness files may rely on things the installer never installs: a
+helper program, a worker role a harness must supply, and the harness's global
+configuration. The module says so in `module.json`, and `--new`, `--add` and `--update`
+report each item without ever installing, running or failing on one (the exit status is
+unchanged):
+
+```json
+{ "helpers": ["ask-codex"],
+  "workers": { "chunk-extractor": "reads the listed files, writes one named chunk" },
+  "global_config": true }
+```
+
+- `helpers`: at most 16 unique names (letters, digits, `.`, `_`, `-`, at most 64
+  characters). A helper is `present` when a regular file of that name is executable and
+  sits in an absolute `PATH` directory, and `missing` otherwise; it is never run. It is
+  reported with or without a harness.
+- `workers`: at most 16 role ids (`[a-z][a-z0-9-]*`) each with a one-line contract of 1 to
+  200 characters. With a harness, the module's `harness.json` maps a role to the file that
+  implements it; a role is `implemented` only when that file was installed for the module
+  in this run (or earlier), and otherwise reports a warning with the contract; under
+  `--dry-run` it says `would be implemented`. Without a harness the line says no harness is
+  selected.
+- `global_config`: `true` when the files need the harness's global configuration. The
+  installer reports `present` when the harness's marker file is valid JSON with
+  `"schema": 1`, `missing` when it is absent, and `missing (unreadable or invalid marker)`
+  for anything else, never echoing its contents. For `claude` the marker is
+  `~/.claude/global-config.json` in the account's home from the password database (not
+  `$HOME`); `--global-config DIR` reads `DIR/global-config.json` instead. A symlinked
+  marker, a file over 4 KiB, or an empty or relative directory is not accepted.
+
+The lines appear under "Declared dependencies" for the modules in the run: the new
+modules for `--new` and `--add` (every installed built-in module when `--add --harness`
+activates a harness), and the updated modules for `--update`. An `--add` that finds
+everything installed prints "Nothing to add" and no lines. No module declares anything yet.
 
 ## Boundaries
 

@@ -1,6 +1,6 @@
 # Declarations and reporting
 
-Status: Approved
+Status: In Progress
 Created: 2026-10-19
 
 ## Goal
@@ -196,5 +196,59 @@ Completion: the findings are decided and the suite is green.
 
 ## Result
 
-<!-- Complete this only after verification. Archive the plan according to
-docs/plans/README.md, then reset this file to the empty template. -->
+Increments A to E are done and verified; the plan commit is `d6558a7` and the work is uncommitted. The
+suite passes with 473 tests (425 before, 48 new in `DeclarationTest`, `MarkerTest`, `HelperTest` and
+`DeclarationReportTest`).
+
+- Increment A: `declarations_problem` validates `helpers`, `workers` and `global_config` when a module
+  loads; a module without them has empty declarations.
+- Increment B: `read_marker`, `marker_path`, `home_directory` (password database, never `$HOME`),
+  `find_helper` (absolute `PATH` entries, regular and executable, never run), the marker name in the
+  harness table, and `--global-config DIR`, refused with `--list`, `--register`, `--unregister` and
+  `--remove`.
+- Increment C: `report_declarations` (through `report_safely`), `read_harness_roles`; one line per item
+  for the modules in the run after the other output of `--new`, `--add` and `--update`, with no effect
+  on the exit status. A role counts as implemented only when its file is recorded for the module after
+  the run.
+- Increment D: README "Declared dependencies" section and the module layout text.
+- Choices where the specification was silent: with no harness a `global_config` module reports "no
+  harness selected"; `--global-config` is refused with the other actions; lines are prefixed with the
+  module name; `--dry-run` words a role as `would be implemented`; a failing report prints one note and
+  never fails the run (the report runs after the writes in `--new` and `--add`).
+
+Verification: `python3 -I -m unittest discover -s tests` passes with 473 tests; `git diff --check` is
+clean. Mutation checks on scratch copies (no report, `$HOME` instead of the password database, accepting
+`schema: true`, accepting a non-executable helper, accepting a relative `PATH` entry, counting a
+conflict-skipped file as implemented, accepting a relative marker directory) each fail the new tests; a
+mutation that followed a symlinked marker hung on a FIFO, which the real code refuses before opening.
+The first draft of the report tests ran with `PATH` limited to the fixture directory, which broke `git`,
+so they failed for the wrong reason; they now keep the real `PATH` and the mutation checks confirm they
+fail for the right ones.
+
+Adversarial review (`security-reviewer`, scratch copies, one pass): no Critical, High or Medium finding.
+The marker, `PATH` and `module.json` reads held against every case tried (symlinked or FIFO or device
+marker, 4096 and 4097 bytes, a file that grew after `lstat`, hostile JSON, a hostile `$HOME`, odd
+`pwd` values, `--global-config` values with NUL, newline or 70 KB, relative and empty `PATH` entries,
+loops, a fake executable on `PATH` that was never run, hostile declarations, and dry-run snapshots).
+- Low, applied: the report was documented as never failing but had no guard; `report_safely` now
+  catches any exception and prints one note, with a test that a failing report leaves a complete install.
+- Low, applied: a dry run said "implemented" although nothing is installed yet; it now says "would be
+  implemented".
+- Low, not applied: `isprintable()` accepts Unicode lookalikes in a contract (a Cyrillic letter prints as
+  itself). Control, bidi and line-separator characters are refused; `module.json` is trusted template
+  code under ADR 0002, so the effect is cosmetic and restricting contracts to ASCII would only cost
+  legitimate text.
+- Test gaps the review listed, now covered: the 4096 and 4097 boundary was already tested; added a size
+  that grew after `lstat`, a symlink to `/dev/zero`, NUL, newline and very long `--global-config`
+  values, a `PATH` symlink loop, `--global-config` leaving the tree and manifest unchanged, dry runs of
+  `--add` and `--update` with a declaring module, and a failing report; the vacuous "real modules
+  declare nothing" test is now "every real module passes the declaration rules".
+- Not exercised: executability by another uid or a setuid `PATH` directory, real `getpwuid` anomalies
+  (patched only), a genuine concurrent file-growth race (simulated by patching `lstat`), and a user-edited
+  harness file conflicting during `--update` as it affects the "implemented" label.
+
+Residual: the "implemented" label follows the planned record, not the disk, so a file the user deleted
+still reads as implemented until `--update` restores it.
+
+Not done (deferred above): converting a real module to declare dependencies (candidates 5, 6, 7), the
+marker's writer in `claude_global_config`, and external-store declarations.

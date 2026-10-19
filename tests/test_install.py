@@ -4809,6 +4809,291 @@ class HarnessSecondPassTest(HarnessCase):
         self.assertTrue(os.path.exists(self.path(".claude/agents/a.md")))
 
 
+class DeclarationTest(unittest.TestCase):
+    """Plan 0020 increment A: helpers, workers and global_config in module.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+
+    def load(self, **keys):
+        os.makedirs(os.path.join(self.root, "m"), exist_ok=True)
+        with open(os.path.join(self.root, "m", "module.json"), "w") as handle:
+            json.dump(dict({"description": "m"}, **keys), handle)
+        return install.load_modules(self.root)["m"]
+
+    def refused(self, **keys):
+        with self.assertRaises(install.InstallError) as ctx:
+            self.load(**keys)
+        self.assertIn("module m", str(ctx.exception))
+
+    def test_valid_declarations_are_kept_on_the_record(self):
+        meta = self.load(helpers=["ask-codex", "claude-workflow"],
+                         workers={"chunk-extractor": "reads the listed files, writes one chunk"},
+                         global_config=True)
+        self.assertEqual(meta["helpers"], ["ask-codex", "claude-workflow"])
+        self.assertEqual(meta["workers"], {"chunk-extractor": "reads the listed files, writes one chunk"})
+        self.assertIs(meta["global_config"], True)
+
+    def test_a_module_without_them_has_empty_declarations(self):
+        meta = self.load()
+        self.assertEqual((meta["helpers"], meta["workers"], meta["global_config"]), ([], {}, False))
+
+    def test_global_config_false_is_accepted(self):
+        self.assertIs(self.load(global_config=False)["global_config"], False)
+
+    def test_helpers_rules(self):
+        for value in ("ask-codex", {"a": 1}, [1], [None], [""], [".hidden"], ["-lead"],
+                      ["has space"], ["a/b"], ["x" * 65], ["name\n"], ["dup", "dup"],
+                      ["h%d" % n for n in range(17)], ["tab\tname"], ["\u00e9"]):
+            with self.subTest(value=value):
+                self.refused(helpers=value)
+
+    def test_helpers_exactly_at_the_limits_are_accepted(self):
+        self.load(helpers=["h%d" % n for n in range(16)])
+        self.load(helpers=["a" + "b" * 63])
+        self.load(helpers=["A.b_c-1"])
+
+    def test_workers_rules(self):
+        ok = "reads files, writes one output"
+        for value in ([], "x", {"Bad": ok}, {"1bad": ok}, {"r": ""}, {"r": "x" * 201},
+                      {"r": "two\nlines"}, {"r": "bell\u0007"}, {"r": 5}, {"r": None},
+                      {"r%d" % n: ok for n in range(17)}, {"r" * 65: ok}, {"": ok}):
+            with self.subTest(value=value):
+                self.refused(workers=value)
+
+    def test_workers_exactly_at_the_limits_are_accepted(self):
+        self.load(workers={"r%d" % n: "c" for n in range(16)})
+        self.load(workers={"r" * 64: "x" * 200})
+
+    def test_global_config_must_be_a_boolean(self):
+        for value in (1, 0, "true", None, [], {}):
+            with self.subTest(value=value):
+                self.refused(global_config=value)
+
+    def test_every_real_module_passes_the_declaration_rules(self):
+        for name, meta in install.load_modules().items():
+            self.assertIsNone(install.declarations_problem(meta), name)
+
+
+class MarkerTest(unittest.TestCase):
+    """Plan 0020 increment B: the global-configuration marker (specification, "Declarations")."""
+
+    MISSING_BAD = "missing (unreadable or invalid marker)"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = os.path.join(self.tmp.name, "cfg")
+        os.makedirs(self.dir)
+        self.path = os.path.join(self.dir, "global-config.json")
+
+    def put(self, data):
+        with open(self.path, "wb") as handle:
+            handle.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def state(self):
+        return install.read_marker("claude", self.dir)
+
+    def test_a_valid_marker_is_present(self):
+        self.put('{"schema": 1}')
+        self.assertEqual(self.state(), "present")
+        self.put('{"schema": 1, "name": "claude_global_config", "extra": [1, 2]}')
+        self.assertEqual(self.state(), "present")
+
+    def test_an_absent_marker_is_missing(self):
+        self.assertEqual(self.state(), "missing")
+        self.assertEqual(install.read_marker("claude", os.path.join(self.tmp.name, "nowhere")), "missing")
+
+    def test_every_other_state_is_missing_and_invalid(self):
+        os.symlink(os.path.join(self.dir, "target.json"), self.path)
+        with open(os.path.join(self.dir, "target.json"), "w") as handle:
+            handle.write('{"schema": 1}')
+        cases = {
+            "symlink": None,
+            "not json": "{",
+            "a list": "[1]",
+            "a string": '"x"',
+            "schema true": '{"schema": true}',
+            "schema float": '{"schema": 1.0}',
+            "schema string": '{"schema": "1"}',
+            "schema two": '{"schema": 2}',
+            "no schema": "{}",
+            "not utf-8": b'{"schema": 1, "x": "\xff"}',
+            "nul": b'{"schema": 1}\0',
+            "deeply nested": "[" * 100000 + "]" * 100000,
+            "too big": '{"schema": 1, "pad": "%s"}' % ("x" * 5000),
+        }
+        for label, data in cases.items():
+            with self.subTest(label=label):
+                if data is not None:
+                    if os.path.lexists(self.path):
+                        os.unlink(self.path)
+                    self.put(data)
+                self.assertEqual(self.state(), self.MISSING_BAD)
+
+    def test_a_directory_and_a_fifo_are_invalid(self):
+        os.mkdir(self.path)
+        self.assertEqual(self.state(), self.MISSING_BAD)
+        os.rmdir(self.path)
+        os.mkfifo(self.path)
+        self.assertEqual(self.state(), self.MISSING_BAD)
+
+    def test_four_kib_exactly_is_accepted_and_one_more_is_not(self):
+        body = '{"schema": 1, "pad": "%s"}'
+        fill = 4096 - len(body % "")
+        self.put(body % ("x" * fill))
+        self.assertEqual(os.path.getsize(self.path), 4096)
+        self.assertEqual(self.state(), "present")
+        self.put(body % ("x" * (fill + 1)))
+        self.assertEqual(self.state(), self.MISSING_BAD)
+
+    def test_a_size_that_grew_after_lstat_is_still_bounded(self):
+        self.put('{"schema": 1, "pad": "%s"}' % ("x" * 5000))
+        real = os.lstat(self.path)
+        small = unittest.mock.Mock(st_mode=real.st_mode, st_size=10)
+        with unittest.mock.patch.object(install.os, "lstat", return_value=small):
+            self.assertEqual(self.state(), self.MISSING_BAD)
+
+    def test_a_symlink_to_a_device_is_refused_without_reading_it(self):
+        os.symlink("/dev/zero", self.path)
+        self.assertEqual(self.state(), self.MISSING_BAD)
+
+    def test_odd_override_values_are_missing_and_never_raise(self):
+        for value in ("\0", "/tmp/\0x", "/tmp/new\nline", "/" + "x" * 70000, "~", ""):
+            with self.subTest(value=value[:20]):
+                self.assertEqual(install.read_marker("claude", value), "missing")
+
+    def test_a_symlinked_parent_directory_is_followed(self):
+        self.put('{"schema": 1}')
+        link = os.path.join(self.tmp.name, "link")
+        os.symlink(self.dir, link)
+        self.assertEqual(install.read_marker("claude", link), "present")
+
+    def test_the_marker_is_found_through_the_password_database_not_home(self):
+        home = os.path.join(self.tmp.name, "home")
+        os.makedirs(os.path.join(home, ".claude"))
+        with open(os.path.join(home, ".claude", "global-config.json"), "w") as handle:
+            handle.write('{"schema": 1}')
+        elsewhere = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, ".claude"))
+        fake = unittest.mock.Mock()
+        fake.getpwuid.return_value = unittest.mock.Mock(pw_dir=home)
+        with unittest.mock.patch.object(install, "pwd", fake), \
+                unittest.mock.patch.dict(os.environ, {"HOME": elsewhere}):
+            self.assertEqual(install.read_marker("claude"), "present")
+        with unittest.mock.patch.object(install, "pwd", fake), \
+                unittest.mock.patch.dict(os.environ, {"HOME": home}):
+            fake.getpwuid.return_value = unittest.mock.Mock(pw_dir=elsewhere)
+            self.assertEqual(install.read_marker("claude"), "missing")
+
+    def test_a_relative_empty_or_unavailable_home_is_missing(self):
+        for home in ("", "relative/home", None):
+            with self.subTest(home=home):
+                fake = unittest.mock.Mock()
+                fake.getpwuid.return_value = unittest.mock.Mock(pw_dir=home)
+                with unittest.mock.patch.object(install, "pwd", fake):
+                    self.assertEqual(install.read_marker("claude"), "missing")
+        with unittest.mock.patch.object(install, "pwd", None):
+            self.assertEqual(install.read_marker("claude"), "missing")
+        broken = unittest.mock.Mock()
+        broken.getpwuid.side_effect = KeyError("no entry")
+        with unittest.mock.patch.object(install, "pwd", broken):
+            self.assertEqual(install.read_marker("claude"), "missing")
+
+    def test_an_empty_or_relative_override_is_missing(self):
+        self.put('{"schema": 1}')
+        for value in ("", "cfg", os.path.relpath(self.dir)):
+            with self.subTest(value=value):
+                self.assertEqual(install.read_marker("claude", value), "missing")
+
+    def test_the_option_is_refused_with_the_other_actions(self):
+        for argv in (["--list"], ["--register", self.tmp.name], ["--unregister", "nope"],
+                     ["--remove", "demo", "--dir", self.tmp.name]):
+            with self.subTest(argv=argv):
+                code, out, err = run(argv + ["--global-config", self.dir])
+                self.assertEqual(code, 2)
+                self.assertIn("--global-config", err)
+
+
+class HelperTest(unittest.TestCase):
+    """Plan 0020 increment B: helper detection on PATH, never running anything."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bin = os.path.join(self.tmp.name, "bin")
+        os.makedirs(self.bin)
+        self.sentinel = os.path.join(self.tmp.name, "ran")
+        saved = os.environ.get("PATH")
+        self.addCleanup(lambda: os.environ.__setitem__("PATH", saved) if saved is not None
+                        else os.environ.pop("PATH", None))
+
+    def tool(self, name, mode=0o755, where=None):
+        path = os.path.join(where or self.bin, name)
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\ntouch %s\n" % self.sentinel)
+        os.chmod(path, mode)
+        return path
+
+    def test_an_executable_file_is_present(self):
+        self.tool("ask-codex")
+        os.environ["PATH"] = self.bin
+        self.assertTrue(install.find_helper("ask-codex"))
+        self.assertFalse(install.find_helper("other"))
+
+    def test_it_is_found_in_a_later_directory_and_never_run(self):
+        later = os.path.join(self.tmp.name, "later")
+        os.makedirs(later)
+        self.tool("remote-runner", where=later)
+        os.environ["PATH"] = os.pathsep.join([self.bin, later])
+        self.assertTrue(install.find_helper("remote-runner"))
+        self.assertFalse(os.path.exists(self.sentinel))
+
+    def test_a_file_without_the_execute_bit_is_missing(self):
+        self.tool("plain", mode=0o644)
+        os.environ["PATH"] = self.bin
+        self.assertFalse(install.find_helper("plain"))
+
+    def test_a_directory_or_fifo_of_that_name_is_missing(self):
+        os.mkdir(os.path.join(self.bin, "adir"))
+        os.mkfifo(os.path.join(self.bin, "afifo"))
+        os.environ["PATH"] = self.bin
+        self.assertFalse(install.find_helper("adir"))
+        self.assertFalse(install.find_helper("afifo"))
+
+    def test_a_symlink_to_an_executable_counts_and_a_broken_one_does_not(self):
+        real = self.tool("real", where=self.tmp.name)
+        os.symlink(real, os.path.join(self.bin, "linked"))
+        os.symlink(os.path.join(self.tmp.name, "gone"), os.path.join(self.bin, "dangling"))
+        os.environ["PATH"] = self.bin
+        self.assertTrue(install.find_helper("linked"))
+        self.assertFalse(install.find_helper("dangling"))
+
+    def test_relative_and_empty_path_entries_are_ignored(self):
+        self.tool("tool")
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.bin)
+        for path in ("", ".", "bin", os.pathsep, os.pathsep + "relative", ".." + os.pathsep + "."):
+            os.environ["PATH"] = path
+            self.assertFalse(install.find_helper("tool"), path)
+        os.environ["PATH"] = os.pathsep + self.bin
+        self.assertTrue(install.find_helper("tool"))
+
+    def test_a_symlink_loop_is_missing(self):
+        os.symlink(os.path.join(self.bin, "b"), os.path.join(self.bin, "a"))
+        os.symlink(os.path.join(self.bin, "a"), os.path.join(self.bin, "b"))
+        os.environ["PATH"] = self.bin
+        self.assertFalse(install.find_helper("a"))
+
+    def test_an_unset_path_finds_nothing(self):
+        self.tool("tool")
+        os.environ.pop("PATH", None)
+        self.assertFalse(install.find_helper("tool"))
+
+
 class HarnessPilotTest(ProjectCase):
     """Plan 0019: the real cad-freecad module ships the freecad-scripts skill."""
 
@@ -4922,6 +5207,226 @@ class HarnessPilotTest(ProjectCase):
         script = os.path.join(meta["path"], "harness", "claude", "skills", "freecad-scripts",
                               "scripts", "mesh_report.py")
         self.assertFalse(os.stat(script).st_mode & 0o111)
+
+
+class DeclarationReportTest(HarnessCase):
+    """Plan 0020 increment C: the dependency report for new, add and update."""
+
+    EXTRACTOR = "reads the listed files, writes one chunk"
+
+    def setUp(self):
+        super().setUp()
+        self.bin = os.path.join(self.work, "bin")
+        os.makedirs(self.bin)
+        self.sentinel = os.path.join(self.work, "ran")
+        self.cfg = os.path.join(self.work, "cfg")
+        os.makedirs(self.cfg)
+        self.marker = os.path.join(self.cfg, "global-config.json")
+        with open(self.marker, "w") as handle:
+            handle.write('{"schema": 1}')
+        self.tool("zz-tool-a")
+        os.environ["PATH"] = self.bin + os.pathsep + os.environ.get("PATH", "")  # git must still run
+
+    def tool(self, name):
+        path = os.path.join(self.bin, name)
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\ntouch %s\n" % self.sentinel)
+        os.chmod(path, 0o755)
+
+    def dep(self, name="dep", **extra):
+        meta = dict(helpers=["zz-tool-a", "zz-tool-b"], workers={"extractor": self.EXTRACTOR},
+                    global_config=True)
+        meta.update(extra)
+        self.module(name, harness={"agents/e.md": "extractor\n",
+                                   "harness.json": '{"roles": {"extractor": "agents/e.md"}}'}, **meta)
+
+    def run_new(self, with_, *extra):
+        return self.new_h(with_, "--global-config", self.cfg, *extra)
+
+    def lines(self, out):
+        return [line.strip() for line in out.splitlines()]
+
+    def test_every_item_is_reported_for_a_new_project(self):
+        self.dep()
+        code, out, err = self.run_new("dep", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        lines = self.lines(out)
+        self.assertIn("Declared dependencies:", lines)
+        for expected in ("dep: helper zz-tool-a: present", "dep: helper zz-tool-b: missing",
+                         "dep: worker extractor: implemented by dep",
+                         "dep: global configuration: present"):
+            self.assertIn(expected, lines)
+        self.assertFalse(os.path.exists(self.sentinel))
+
+    def test_dry_run_reports_too(self):
+        self.dep()
+        code, out, err = self.run_new("dep", "--harness", "claude", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("dep: helper zz-tool-b: missing", self.lines(out))
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_a_missing_or_invalid_marker_is_reported_without_its_contents(self):
+        self.dep()
+        os.unlink(self.marker)
+        out = self.run_new("dep", "--harness", "claude")[1]
+        self.assertIn("dep: global configuration: missing", self.lines(out))
+        shutil.rmtree(self.target())
+        with open(self.marker, "w") as handle:
+            handle.write("SECRET-CONTENT")
+        out = self.run_new("dep", "--harness", "claude")[1]
+        self.assertIn("dep: global configuration: missing (unreadable or invalid marker)", self.lines(out))
+        self.assertNotIn("SECRET", out)
+
+    def test_missing_items_leave_the_exit_status_at_zero(self):
+        self.dep()
+        os.unlink(self.marker)
+        code, out, err = self.run_new("dep", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertIn("helper zz-tool-b: missing", out)
+
+    def test_a_role_that_is_not_implemented_is_a_warning_with_its_contract(self):
+        self.module("unmapped", harness={"agents/e.md": "x\n", "harness.json": '{"roles": {}}'},
+                    workers={"extractor": self.EXTRACTOR})
+        self.module("bare", workers={"extractor": self.EXTRACTOR})
+        out = self.run_new("unmapped,bare", "--harness", "claude")[1]
+        for module in ("unmapped", "bare"):
+            self.assertIn("%s: warning: claude does not implement worker extractor (%s)"
+                          % (module, self.EXTRACTOR), self.lines(out))
+
+    def test_a_role_in_harness_json_that_the_module_did_not_declare_prints_nothing(self):
+        self.module("quiet", harness={"agents/e.md": "x\n",
+                                      "harness.json": '{"roles": {"extractor": "agents/e.md"}}'})
+        out = self.run_new("quiet", "--harness", "claude")[1]
+        self.assertNotIn("worker", out)
+        self.assertNotIn("Declared dependencies", out)
+
+    def test_a_mapped_file_skipped_as_a_conflict_does_not_count_as_implemented(self):
+        self.dep()
+        self.module("other")
+        self.assertEqual(self.new_h("dep")[0], 0)
+        os.makedirs(self.path(".claude/agents"))
+        self.write(".claude/agents/e.md", "mine\n")
+        code, out, err = run(["--add", "other", "--harness", "claude", "--global-config", self.cfg,
+                              "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertIn("dep: warning: claude does not implement worker extractor (%s)" % self.EXTRACTOR,
+                      self.lines(out))
+        self.assertIn("conflict .claude/agents/e.md", out)
+
+    def test_without_a_harness_helpers_are_checked_and_the_rest_says_so(self):
+        self.dep()
+        code, out, err = self.run_new("dep")
+        self.assertEqual(code, 0, err)
+        lines = self.lines(out)
+        self.assertIn("dep: helper zz-tool-a: present", lines)
+        self.assertIn("dep: worker extractor: no harness selected", lines)
+        self.assertIn("dep: global configuration: no harness selected", lines)
+
+    def test_modules_without_declarations_print_nothing(self):
+        self.module("plain")
+        out = self.run_new("plain", "--harness", "claude")[1]
+        self.assertNotIn("Declared dependencies", out)
+
+    def test_add_reports_the_added_module_and_activation_reports_every_installed_one(self):
+        self.dep()
+        self.dep("dep2", helpers=["zz-tool-a"], workers={}, global_config=False)
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        out = run(["--add", "dep2", "--global-config", self.cfg, "--dir", self.target()])[1]
+        self.assertIn("dep2: helper zz-tool-a: present", self.lines(out))
+        self.assertNotIn("dep:", out.replace("dep2:", ""))
+        shutil.rmtree(self.target())
+        self.assertEqual(self.new_h("dep,plain")[0], 0)
+        out = run(["--add", "dep2", "--harness", "claude", "--global-config", self.cfg,
+                   "--dir", self.target()])[1]
+        self.assertIn("dep: worker extractor: implemented by dep", self.lines(out))
+        self.assertIn("dep2: helper zz-tool-a: present", self.lines(out))
+
+    def test_adding_an_installed_module_prints_nothing_and_update_reports_it(self):
+        self.dep()
+        self.assertEqual(self.run_new("dep", "--harness", "claude")[0], 0)
+        out = run(["--add", "dep", "--global-config", self.cfg, "--dir", self.target()])[1]
+        self.assertIn("Nothing to add", out)
+        self.assertNotIn("Declared dependencies", out)
+        shutil.rmtree(self.target())
+        self.assertEqual(self.new_h("dep")[0], 0)
+        out = run(["--add", "dep", "--global-config", self.cfg, "--dir", self.target()])[1]
+        self.assertIn("Nothing to add", out)
+        self.assertNotIn("Declared dependencies", out)
+        code, out, err = self.update("--global-config", self.cfg)
+        self.assertEqual(code, 0, err)
+        self.assertIn("dep: helper zz-tool-a: present", self.lines(out))
+
+    def test_update_reports_even_when_there_is_nothing_to_update(self):
+        self.dep()
+        self.assertEqual(self.run_new("dep", "--harness", "claude")[0], 0)
+        code, out, err = self.update("--global-config", self.cfg)
+        self.assertEqual(code, 0, err)
+        self.assertIn("Nothing to update", out)
+        self.assertIn("dep: worker extractor: implemented by dep", self.lines(out))
+        self.assertIn("dep: global configuration: present", self.lines(out))
+
+    def test_update_of_a_named_module_reports_only_that_module(self):
+        self.dep()
+        self.dep("dep2", helpers=["zz-tool-a"], workers={}, global_config=False)
+        self.assertEqual(self.run_new("dep,dep2", "--harness", "claude")[0], 0)
+        out = self.update("dep2", "--global-config", self.cfg)[1]
+        self.assertIn("dep2: helper zz-tool-a: present", self.lines(out))
+        self.assertNotIn("dep: ", out.replace("dep2: ", ""))
+
+    def test_a_failing_report_cannot_fail_an_install(self):
+        self.dep()
+        with unittest.mock.patch.object(install, "report_declarations",
+                                        side_effect=RuntimeError("boom")):
+            code, out, err = self.run_new("dep", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertIn("dependency report failed", out)
+        self.assertTrue(os.path.exists(self.path(".claude/agents/e.md")))
+        self.assertNotIn("boom", out)
+
+    def test_a_dry_run_says_would_be_implemented(self):
+        self.dep()
+        out = self.run_new("dep", "--harness", "claude", "--dry-run")[1]
+        self.assertIn("dep: worker extractor: would be implemented by dep", self.lines(out))
+        shutil.rmtree(self.target(), ignore_errors=True)
+        out = self.run_new("dep", "--harness", "claude")[1]
+        self.assertIn("dep: worker extractor: implemented by dep", self.lines(out))
+
+    def test_the_option_changes_nothing_that_is_installed_or_recorded(self):
+        self.dep()
+        trees = []
+        for label, extra in (("p1", ["--global-config", self.cfg]), ("p2", [])):
+            target = os.path.join(self.work, label)
+            code, out, err = run([target, "--with", "dep", "--harness", "claude", "--name", "same",
+                                  "--git-name", "T", "--git-email", "t@users.noreply.example.invalid",
+                                  *extra])
+            self.assertEqual(code, 0, err)
+            trees.append(read_tree(target))
+        self.assertEqual(trees[0], trees[1])
+
+    def test_dry_runs_of_add_and_update_write_nothing(self):
+        self.dep()
+        self.module("plain")
+        self.assertEqual(self.new_h("plain", "--harness", "claude")[0], 0)
+        before = read_tree(self.target())
+        code, out, err = run(["--add", "dep", "--dry-run", "--global-config", self.cfg,
+                              "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertIn("dep: helper zz-tool-a: present", self.lines(out))
+        self.assertEqual(read_tree(self.target()), before)
+        self.assertEqual(run(["--add", "dep", "--dir", self.target()])[0], 0)
+        before = read_tree(self.target())
+        os.unlink(self.path(".claude/agents/e.md"))
+        code, out, err = self.update("--dry-run", "--global-config", self.cfg)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(self.path(".claude/agents/e.md")))
+
+    def test_the_fake_helper_is_never_run(self):
+        self.dep()
+        self.assertEqual(self.run_new("dep", "--harness", "claude")[0], 0)
+        self.update("--global-config", self.cfg)
+        run(["--add", "dep", "--dir", self.target()])
+        self.assertFalse(os.path.exists(self.sentinel))
 
 
 class HarnessNewProjectTest(HarnessCase):

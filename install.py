@@ -27,6 +27,11 @@ import sys
 import tempfile
 import unicodedata
 
+try:
+    import pwd
+except ImportError:  # not POSIX: the marker is then reported missing
+    pwd = None
+
 ROOT =os.path.dirname(os.path.realpath(__file__))
 BASE_DIR = os.path.join(ROOT, "base")
 MODULES_DIR = os.path.join(ROOT, "modules")
@@ -101,7 +106,7 @@ def load_modules(modules_dir=None):
         if not NAME_RE.match(name):
             raise InstallError("invalid module name: %r" % name)
         meta = {"description": "", "requires": [], "order": 100, "harness": False,
-                "hint": None}
+                "hint": None, "helpers": [], "workers": {}, "global_config": False}
         meta_path = os.path.join(path, "module.json")
         if os.path.lexists(meta_path):
             try:
@@ -124,6 +129,9 @@ def load_modules(modules_dir=None):
         problem = module_info_problem({k: meta[k] for k in INFO_KEYS if k in meta})
         if problem:
             raise InstallError("module %s: %s" % (name, problem))
+        problem = declarations_problem(meta)
+        if problem:
+            raise InstallError("module %s: %s" % (name, problem))
         slots = {}
         slot_dir = os.path.join(path, "slots")
         refuse_symlink(os.path.join(path, "files"), "module %s" % name)
@@ -139,6 +147,25 @@ def load_modules(modules_dir=None):
         meta.update(name=name, path=path, slots=slots)
         modules[name] = meta
     return modules
+
+
+def declarations_problem(meta):
+    """Why a module's `helpers`, `workers` or `global_config` are invalid, or None."""
+    helpers, workers = meta["helpers"], meta["workers"]
+    if not (isinstance(helpers, list) and len(helpers) <= DECLARED_MAX
+            and all(isinstance(h, str) and HELPER_RE.match(h) for h in helpers)
+            and len(set(helpers)) == len(helpers)):
+        return ("helpers must be a list of at most %d unique names of letters, digits, '.', '_' "
+                "and '-' (at most 64 characters, starting with a letter or digit)" % DECLARED_MAX)
+    if not (isinstance(workers, dict) and len(workers) <= DECLARED_MAX
+            and all(isinstance(r, str) and ROLE_RE.match(r) and isinstance(c, str)
+                    and 0 < len(c) <= CONTRACT_MAX and c.isprintable()
+                    for r, c in workers.items())):
+        return ("workers must map at most %d role ids ([a-z][a-z0-9-]*, at most 64 characters) "
+                "to a printable one-line contract of 1-%d characters" % (DECLARED_MAX, CONTRACT_MAX))
+    if not isinstance(meta["global_config"], bool):
+        return "global_config must be true or false"
+    return None
 
 
 def info_name_ok(text):
@@ -616,6 +643,9 @@ HARNESS_MAX_TREE_BYTES = 2 * 1024 * 1024
 HARNESS_MAX_DEPTH = 8
 HARNESS_JSON_MAX = 16 * 1024
 HARNESS_ROLES_MAX = 16
+HELPER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+DECLARED_MAX = 16
+CONTRACT_MAX = 200
 HARNESS_RUN_FILES = 512
 HARNESS_RUN_BYTES = 8 * 1024 * 1024
 HARNESS_PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9._ -]{1,200}\Z")
@@ -627,8 +657,12 @@ HARNESSES = {
         "root": ".claude",
         "root_files": ("CLAUDE.md",),
         "entries": ("skills", "agents", "commands", "remote-runner.toml"),
+        "marker": "global-config.json",
     },
 }
+MARKER_MAX_BYTES = 4096
+MARKER_MISSING = "missing"
+MARKER_INVALID = "missing (unreadable or invalid marker)"
 
 
 def fold(text):
@@ -1010,6 +1044,58 @@ def plan_harness(trees, harness, existing, record, project=None):
     return plan
 
 
+def read_harness_roles(module, harness):
+    """{role: installed path} from the module's harness.json for `harness`, or {}."""
+    path = os.path.join(module["path"], "harness", harness, HARNESS_JSON)
+    if not os.path.lexists(path):
+        return {}
+    try:
+        roles = json.loads(read_regular(path, HARNESS_JSON_MAX).decode("utf-8")).get("roles", {})
+        return {role: installed_harness_path(rel, HARNESSES[harness]) for role, rel in roles.items()}
+    except (InstallError, OSError, ValueError, RecursionError, AttributeError):
+        return {}
+
+
+def report_declarations(out, names, modules, harness, record, global_config=None, dry_run=False):
+    """Print one line per declared helper, worker role and global configuration; never fail."""
+    lines = []
+    for name in names:
+        meta = modules.get(name)
+        if meta is None or meta.get("external"):
+            continue
+        for helper in meta["helpers"]:
+            lines.append("%s: helper %s: %s"
+                         % (name, helper, "present" if find_helper(helper) else "missing"))
+        if meta["workers"]:
+            roles = read_harness_roles(meta, harness) if harness else {}
+            for role, contract in sorted(meta["workers"].items()):
+                entry = (record or {}).get(roles.get(role))
+                if not harness:
+                    lines.append("%s: worker %s: no harness selected" % (name, role))
+                elif entry and name in entry["modules"]:
+                    lines.append("%s: worker %s: %simplemented by %s"
+                                 % (name, role, "would be " if dry_run else "", name))
+                else:
+                    lines.append("%s: warning: %s does not implement worker %s (%s)"
+                                 % (name, harness, role, contract))
+        if meta["global_config"]:
+            lines.append("%s: global configuration: %s"
+                         % (name, read_marker(harness, global_config) if harness
+                            else "no harness selected"))
+    if lines:
+        out("Declared dependencies:")
+        for line in lines:
+            out("  " + line)
+
+
+def report_safely(*args, **kwargs):
+    """The dependency report is informational: whatever it hits, the run's work stands."""
+    try:
+        report_declarations(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - never turn a finished install into a failure
+        args[0]("  note: dependency report failed; the install itself is unaffected")
+
+
 def report_harness(out, plan, harness, trees):
     for module in sorted(trees):
         if not trees[module][0]:
@@ -1018,6 +1104,57 @@ def report_harness(out, plan, harness, trees):
         out("  conflict %s (%s)" % (path, why))
     if plan.conflicts:
         out("  harness: %d conflict(s); those files were not written or recorded" % len(plan.conflicts))
+
+
+def home_directory():
+    """The account's home from the password database, never from $HOME."""
+    if pwd is None:
+        return None
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (KeyError, OSError):
+        return None
+
+
+def marker_path(harness, override=None):
+    spec = HARNESSES[harness]
+    if override is not None:
+        base = override
+    else:
+        home = home_directory()
+        base = os.path.join(home, spec["root"]) if isinstance(home, str) and home else None
+    if not isinstance(base, str) or not base or not os.path.isabs(base):
+        return None
+    return os.path.join(base, spec["marker"])
+
+
+def read_marker(harness, override=None):
+    """"present", "missing", or "missing (unreadable or invalid marker)"; never the contents."""
+    path = marker_path(harness, override)
+    if path is None or not os.path.lexists(path):
+        return MARKER_MISSING
+    try:
+        value = json.loads(read_regular(path, MARKER_MAX_BYTES).decode("utf-8"))
+    except (InstallError, OSError, ValueError, RecursionError):
+        return MARKER_INVALID
+    if isinstance(value, dict) and type(value.get("schema")) is int and value["schema"] == 1:
+        return "present"
+    return MARKER_INVALID
+
+
+def find_helper(name):
+    """Is `name` a regular, executable file in an absolute directory of PATH? Never runs it."""
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, name)
+        try:
+            info = os.stat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and os.access(candidate, os.X_OK):
+            return True
+    return False
 
 
 def check_harness_json(data, contents, name):
@@ -1973,6 +2110,9 @@ def cmd_new(args, out):
     if args.dry_run:
         for rel in sorted(tree):
             out("  would write %s" % rel)
+        report_safely(out, names, modules, args.harness,
+                      harness_plan.record if harness_plan else {}, args.global_config,
+                      dry_run=True)
         emit_hints(out, names, modules, True)
         out("Dry run: nothing written.")
         return 0
@@ -1999,6 +2139,8 @@ def cmd_new(args, out):
         out("Unresolved placeholders:")
         for rel, count in counts.items():
             out("  %s: %d" % (rel, count))
+    report_safely(out, names, modules, args.harness,
+                  harness_plan.record if harness_plan else {}, args.global_config)
     emit_hints(out, names, modules, False)
     return 0
 
@@ -2206,15 +2348,19 @@ def cmd_add(args, out):
             out("  note: the harness files of external modules already installed (%s) were "
                 "not read, so none were installed" % ", ".join(sorted(recorded)))
     private = set(harness_plan.writes) if harness_plan else ()
+    reported = [n for n in wanted if n in modules and (activating or n in new)]
+    record = harness_plan.record if harness_plan else {}
     if args.dry_run:
         for rel in sorted(writes):
             out("  would write %s" % rel)
+        report_safely(out, reported, modules, harness, record, args.global_config, dry_run=True)
         emit_hints(out, new, modules, True)
         out("Dry run: nothing written.")
         return 0
     write_tree(project, writes, private=private)
     for rel in sorted(writes):
         out("  wrote %s" % rel)
+    report_safely(out, reported, modules, harness, record, args.global_config)
     emit_hints(out, new, modules, False)
     return 0
 
@@ -2551,6 +2697,9 @@ def cmd_update(args, out):
         out("  note: %s" % note)
     if harness_plan:
         report_harness(out, harness_plan, harness, trees)
+    report_safely(out, targets, modules, harness,
+                  harness_plan.record if harness_plan else {}, args.global_config,
+                  dry_run=args.dry_run)
     record_changed = bool(harness_plan) and harness_plan.record != manifest["harness_files"]
     info = dict(manifest.get("module_info", {}))
     if not entries:
@@ -2800,6 +2949,11 @@ def build_parser():
         help="harness whose module files (harness/<NAME>/) are installed, recorded in the "
              "manifest; known: %s" % ", ".join(sorted(HARNESSES)),
     )
+    parser.add_argument(
+        "--global-config", metavar="DIR",
+        help="directory holding the harness's global-config.json marker (default: the harness "
+             "directory in the account's home); used for the dependency report",
+    )
     parser.add_argument("--list", action="store_true", help="list available modules")
     parser.add_argument(
         "--add", nargs="+", metavar="MODULE",
@@ -2843,6 +2997,8 @@ def main(argv=None, out=print):
         registry_modes = (args.register is not None) + (args.unregister is not None)
         if args.harness is not None and (args.list or registry_modes or removing):
             raise InstallError("--harness applies to a new project, --add and --update only")
+        if args.global_config is not None and (args.list or registry_modes or removing):
+            raise InstallError("--global-config applies to a new project, --add and --update only")
         if removing and (
             registry_modes or args.list or args.add or updating or args.target or args.with_
         ):
