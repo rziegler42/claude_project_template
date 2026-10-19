@@ -1,185 +1,78 @@
-# Harness file specification and trust addendum
+# REPLACE_WITH_PLAN_TITLE
 
-Status: In Progress
-Created: 2026-10-19
+Status: Empty — no active plan
+Created: YYYY-MM-DD
+
+<!-- Replace the heading with a short title unique among your plans (no number)
+and set Created to today's date; review tools identify a plan by both. -->
 
 ## Goal
 
-An approved specification, `docs/specs/module-harness-files.md`, and an ADR 0002 addendum fix
-everything [ADR 0004](../decisions/0004-harness-files-in-modules.md) leaves open, so the installer
-plans that follow (roadmap candidates 2 to 10) can be written without further design decisions.
-This is roadmap candidate 1.
+<!-- Describe one small, observable result. A complete plan becomes Proposed;
+change it to Approved only after explicit approval. -->
 
 ## Scope
 
-- Write the specification. It settles, as names, shapes, numbers and rules:
-  - the harness root table (`claude` to `.claude/`, others later), the `root/` convention for
-    root-level entry points (`harness/<h>/root/` to the project root), and the refusal of an unknown
-    harness name;
-  - the `--harness` option and the manifest shape for the recorded harness, per-path suppliers and
-    co-suppliers, helpers, and approvals;
-  - the `module.json` syntax for `helpers`, `workers` and the global-configuration dependency, the
-    one declaration file inside a harness directory that maps role ids to files, and the marker
-    file's location, format and size limit;
-  - the module format number for harness-bearing external stores, the digest rule that covers the
-    `harness/` tree, and the manifest change that makes an installer from before ADR 0004 refuse a
-    project that records a harness;
-  - `--register` output, `--approve <digest>`, where the approval is stored, and the verb-by-verb
-    digest re-check, including `--add` of an already-installed name and `--update`;
-  - the refusal of a `name=path` store that carries `harness/` without a registered approval;
-  - how removal recognises an unedited harness file and handles a file with several suppliers;
-  - the exact clauses of ADRs 0001 and 0003 and of `docs/specs/external-modules.md` that ADR 0004
-    amends, and the "Amended by 0004" note for each.
-- Write the ADR 0002 addendum: new read inputs (the `harness/` tree, the marker file, the approval
-  record), the new write locations (the harness root and root-level entry points), mitigations to be
-  covered by regression tests in the later plans, and accepted residuals.
-- Review the specification with Codex (`review-spec`) and with an adversarial `security-reviewer`
-  pass, and apply or reject each finding with a reason.
-- Record the owner's acceptance of ADR 0004 and approval of the specification (Increment D).
+<!-- State what this plan changes. -->
 
 ## Non-goals
 
-- Any change to `install.py`, `modules/`, `base/`, tests or the README's behaviour text.
-- Moving any skill or agent, and anything in `claude_global_config` (its ADR 0008, the Graphify
-  split of `claude-workflow`, the marker file's writer). Findings that concern that repository are
-  listed for the owner, not acted on.
-- Choosing which skills move first; the roadmap orders that.
-- Migration of existing projects for candidate 6; that plan decides it.
+<!-- State nearby work that this plan intentionally excludes. -->
 
 ## Assumptions and constraints
 
-- ADR 0004 is `Proposed` and stays so until the owner accepts it together with the approved
-  specification. Nothing is implemented before then.
-- The Codex review of ADR 0004 (four rounds) did not re-review its last two fixes, the `root/`
-  convention and the refusal of path-only stores. The specification reviews must test both.
-- Verified against `install.py` and the specs on disk: an external descriptor rejects unknown keys
-  and unsupported `module_format` values before writing, while a built-in module's unknown
-  `module.json` keys and a `harness/` directory are ignored. The external digest covers
-  `module.json` and `slots/*.md` only. A `name=path` store needs no registry entry, and `--add` of
-  an already-installed name reads neither the store nor the registry. The specification must change
-  or except each of these explicitly.
-- The security pass cannot exercise behaviour that is not implemented. It runs the real installer in
-  a scratch directory to confirm the current behaviour the specification builds on (a store with a
-  `harness/` directory, a planted file, a symlink, a changed store and a `name=path` store, each
-  against today's installer) and attacks the specification's rules by reading. The implementation
-  plans repeat the hostile cases as regression tests.
-- Documentation only: no dependency, secret or destructive action is involved.
+<!-- State verified assumptions, accepted decisions, compatibility boundaries,
+and any unresolved blocker or decision point. -->
 
-Graphify: skipped — the work is documentation, the affected documents are enumerated above, and the
-graph does not exist in this checkout (`graph_missing`); the code facts above were checked directly
-in `install.py`.
+<!-- @module-slot: plan-discovery -->
 
 ## Completion criteria
 
-`docs/specs/module-harness-files.md` exists with `Status: Approved`, and every point ADR 0004's
-Verification section lists as left to the specification has a rule in it; the ADR 0002 addendum is
-present; the specification's `## Review record` shows the Codex review converged or lists its remaining
-findings for the owner, and shows the security pass with each finding applied or rejected with a
-reason and the cases not exercised; ADR 0004
-is `Accepted` and its index row updated, with the "Amended by 0004" notes on ADRs 0001 and 0003 and
-the external-modules specification; `python3 -I -m unittest discover -s tests` still passes
-unchanged; `git diff --check` is clean.
+<!-- State the observable evidence required to complete the whole plan. -->
 
 ## Increments
 
-### Increment A — Write the specification
+### Increment A — REPLACE_WITH_OUTCOME
 
 Dependencies: None
-Affected areas: `docs/specs/module-harness-files.md` (new), `docs/specs/README.md` if it indexes specs
+Affected areas: `REPLACE_WITH_PATHS_OR_COMPONENTS`
 
-1. Draft the specification from ADR 0004 and the Scope list, following the shape of
-   `docs/specs/external-modules.md` (terms, descriptor, syntax, verification, manifest, trust
-   model, acceptance criteria). Where the ADR fixes a rule, quote it; do not reopen it.
-2. For each external-modules rule the ADR relaxes (no `files/`, no `harness` key, never
-   harness-specific, optional registration, `--add` not reading an installed store), state the
-   narrow replacement and leave the rest in force.
-3. Give every rule an acceptance criterion a later plan can turn into a test, including the hostile
-   cases: unknown harness name, `root/` traversal, a symlink or special file in `harness/`, a
-   `.git` component, case aliases, an oversized tree, a changed digest, a `name=path` store, an
-   older installer reading the project, and a half-installed project after an interrupted run.
-4. Set `Status: Draft`.
+1. REPLACE_WITH_IMPLEMENTATION_STEP
+2. REPLACE_WITH_VERIFICATION_STEP
 
-Completion: every open point from ADR 0004 maps to a section of the draft, listed in a short
-table at its end.
+Completion: REPLACE_WITH_OBSERVABLE_EVIDENCE
 
-### Increment B — ADR 0002 addendum
+### Increment B — REPLACE_WITH_NEXT_OUTCOME
 
 Dependencies: Increment A
-Affected areas: `docs/decisions/0002-installer-trust-model.md`
+Affected areas: `REPLACE_WITH_PATHS_OR_COMPONENTS`
 
-1. Append an addendum in the form of the existing ones: trust model additions, mitigations to be
-   covered by regression tests, accepted residuals. Cover the `harness/` tree and the approval
-   record as untrusted input, the marker file as the one read outside the target, and the new write
-   locations.
-2. State that Claude Code loads the installed skills and agents automatically, so the digest-pinned
-   approval is the control and the installer's static findings are advisory.
+1. REPLACE_WITH_IMPLEMENTATION_STEP
+2. REPLACE_WITH_VERIFICATION_STEP
 
-Completion: the addendum names each new boundary of the specification and states that nothing is
-implemented yet.
+Completion: REPLACE_WITH_OBSERVABLE_EVIDENCE
 
-### Increment C — Reviews
-
-Dependencies: Increments A and B
-Affected areas: `docs/specs/module-harness-files.md`, `docs/decisions/0002-installer-trust-model.md`
-
-1. Run `ask-codex review-spec --spec docs/specs/module-harness-files.md` (the helper's bound
-   applies; further rounds need the owner's `extend`); decide each blocker and major finding with
-   `ask-codex decide --spec ... <ID> applied|rejected`, giving a concrete reason for a rejection.
-2. Run an adversarial pass by delegating to the `security-reviewer` agent, briefed with the
-   `security-review` skill's method, the specification, and the scratch cases from the assumptions.
-   Its experiments run in a scratch directory outside the repository. Apply or reject each finding
-   with a reason and rerun the cases a fix touches.
-3. Record both reviews in a `## Review record` section at the end of the specification, since the
-   helper's ledger under `.debug/` is untracked. For the Codex review: rounds used of the bound,
-   model and effort, and every blocker and major finding with its ID, disposition and reason. For
-   the security pass: the cases run and their observed results, each finding with severity,
-   disposition and reason, the rerun results after any fix, and the cases not exercised.
-4. Keep findings about other documents or about `claude_global_config` in a separate list in the
-   report to the owner, not in the specification.
-
-Completion: the specification's Review record lists every finding with a disposition, none is
-undecided, and the unexercised cases are named.
-
-### Increment D — Acceptance
-
-Dependencies: Increment C and the owner's explicit acceptance of ADR 0004 and approval of the
-specification
-Affected areas: `docs/decisions/0004-harness-files-in-modules.md`, `docs/decisions/README.md`,
-`docs/decisions/0001-module-and-slot-architecture.md`,
-`docs/decisions/0003-external-module-mechanism.md`, `docs/specs/external-modules.md`,
-`docs/specs/module-harness-files.md`, `docs/roadmaps/module-harness-files.md`
-
-1. Do nothing in this increment until the owner says so in terms. Then set ADR 0004 to `Accepted`,
-   its index row to match, and the specification to `Approved`.
-2. Add the "Amended by 0004" notes the specification names to ADRs 0001 and 0003 and the
-   external-modules specification, without changing their other text.
-3. Update the roadmap's current state and promotion triggers for candidate 2.
-
-Completion: the documents agree on status and on the amended clauses; `git diff --check` is clean.
+<!-- Remove unused increments. Add further increments with uppercase letters.
+For an explicitly approved insertion between stable B and C labels, use B-A,
+then B-B. -->
 
 ## Verification
 
-- `python3 -I -m unittest discover -s tests` (unchanged suite passes; no code changes).
-- `git diff --check`, and a check that every relative link in the new and changed documents
-  resolves.
-- The `## Review record` in the specification (Increment C).
+<!-- Name known repository commands and the behavior they prove. -->
 
 ## Risks and sensitive actions
 
-- The specification fixes a trust boundary that loads instruction files automatically; a gap here
-  carries into every later plan. Mitigated by two independent reviews before approval.
-- Increment D changes the status of accepted decisions. It waits for the owner's explicit
-  acceptance and is never inferred from review results.
-- No commit, push or installer change without the owner's request.
+<!-- Identify risky, irreversible, security-sensitive, or externally visible
+actions before implementation. Write "None identified" when applicable. -->
+
+<!-- @module-slot: plan-review -->
 
 ## Deferred work
 
-- Installer implementation (roadmap candidates 2, 4 and 8), pilots (3, 7), the Graphify split (5),
-  the `claude` module conversion (6), knowledge-base stores (9) and the global configuration cleanup
-  (10).
-- The ADR 0008 note in `claude_global_config`.
+<!-- Record discoveries intentionally excluded from this plan. Remove this
+section when there is no deferred work. -->
 
 ## Result
 
 <!-- Complete this only after verification. Archive the plan according to
-docs/plans/README.md, then reset this file to the empty template. -->
+README.md, then reset this file to the empty template. -->
