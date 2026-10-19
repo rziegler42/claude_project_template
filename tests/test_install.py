@@ -85,6 +85,14 @@ def read_tree(root):
     return tree
 
 
+def neutrality_problems(root):
+    """(path, name) pairs where tool-specific names appear outside installed harness files."""
+    with open(os.path.join(root, ".template-manifest"), encoding="utf-8") as handle:
+        recorded = set(json.load(handle).get("harness_files", {}))
+    return [(path, needle) for path, text in read_tree(root).items() if path not in recorded
+            for needle in HARNESS_NAMES if needle in text]
+
+
 class InstallerTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -226,9 +234,7 @@ class InstallerTest(unittest.TestCase):
         modules = install.load_modules()
         non_harness = [n for n, m in modules.items() if not m["harness"]]
         self.new(",".join(non_harness))
-        for path, text in read_tree(self.target()).items():
-            for needle in HARNESS_NAMES:
-                self.assertNotIn(needle, text, "%s mentions %s" % (path, needle))
+        self.assertEqual(neutrality_problems(self.target()), [])
 
     def test_placeholder_name_substituted(self):
         self.new(name="my-project")
@@ -3765,6 +3771,1202 @@ class ExternalModuleInfoTest(ProjectCase):
         self.assertEqual(code, 2)
         self.assertIn("odd", err)
         self.assertFalse(os.path.exists(self.target()))
+
+
+class HarnessTreeTest(unittest.TestCase):
+    """Plan 0018 increment A: the built-in harness tree reader (specification, "Layout")."""
+
+    SKILL = "---\nname: x\ndescription: d\n---\nbody\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.module = {"name": "m", "path": os.path.join(self.tmp.name, "m")}
+        os.makedirs(self.module["path"])
+
+    def put(self, rel, data="x\n"):
+        full = os.path.join(self.module["path"], "harness", "claude", *rel.split("/"))
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as handle:
+            handle.write(data if isinstance(data, bytes) else data.encode("utf-8"))
+
+    def read(self, reserved=frozenset()):
+        return install.read_harness_tree(self.module, "claude", reserved=reserved)
+
+    def refused(self, *needles):
+        with self.assertRaises(install.InstallError) as ctx:
+            self.read()
+        for needle in needles:
+            self.assertIn(needle, str(ctx.exception))
+        return str(ctx.exception)
+
+    def test_installed_paths_and_units(self):
+        self.put("skills/x/SKILL.md", self.SKILL)
+        self.put("skills/x/notes.md", "n\n")
+        self.put("agents/a.md", "---\nname: agent-a\n---\nbody\n")
+        self.put("commands/c.md", "plain\n")
+        self.put("remote-runner.toml", "k = 1\n")
+        self.put("root/CLAUDE.md", "@AGENTS.md\n")
+        self.put("harness.json", '{"roles": {"extractor": "agents/a.md"}}')
+        files, units = self.read()
+        self.assertEqual(sorted(files), [
+            ".claude/agents/a.md", ".claude/commands/c.md", ".claude/remote-runner.toml",
+            ".claude/skills/x/SKILL.md", ".claude/skills/x/notes.md", "CLAUDE.md"])
+        self.assertEqual(units, {".claude/skills/x": "x", ".claude/agents/a.md": "agent-a",
+                                 ".claude/commands/c.md": "c"})
+
+    def test_module_without_the_harness_directory_has_nothing(self):
+        self.assertEqual(self.read(), ({}, {}))
+
+    def test_unknown_harness_name_is_refused(self):
+        with self.assertRaises(install.InstallError) as ctx:
+            install.read_harness_tree(self.module, "nope")
+        self.assertIn("harness", str(ctx.exception))
+
+    def test_directory_for_an_unknown_harness_is_refused_without_echoing_a_long_name(self):
+        long_name = "z" * 40
+        os.makedirs(os.path.join(self.module["path"], "harness", long_name))
+        message = self.refused("module m")
+        self.assertNotIn(long_name, message)
+        os.rmdir(os.path.join(self.module["path"], "harness", long_name))
+        os.makedirs(os.path.join(self.module["path"], "harness", "opencode"))
+        self.refused("opencode")
+
+    def test_symlinked_harness_directories_are_refused(self):
+        outside = os.path.join(self.tmp.name, "outside")
+        os.makedirs(outside)
+        os.makedirs(os.path.join(self.module["path"], "harness"))
+        os.symlink(outside, os.path.join(self.module["path"], "harness", "claude"))
+        self.refused("symlink")
+
+    def test_disallowed_source_entries_are_refused(self):
+        for rel in ("settings.json", "settings.local.json", "hooks/run.sh", ".mcp.json",
+                    "README.md", "root/AGENTS.md", "root/sub/CLAUDE.md", "other/x.md"):
+            with self.subTest(rel=rel):
+                self.tmp.cleanup()
+                self.setUp()
+                self.put(rel)
+                self.refused()
+
+    def test_a_directory_named_like_a_root_file_or_declaration_is_refused(self):
+        os.makedirs(os.path.join(self.module["path"], "harness", "claude", "harness.json"))
+        self.refused("harness.json")
+
+    def test_harness_json_rules(self):
+        cases = {
+            "not json": "{",
+            "a list": "[]",
+            "unknown key": '{"roles": {}, "extra": 1}',
+            "roles not an object": '{"roles": []}',
+            "bad role id": '{"roles": {"Bad": "agents/a.md"}}',
+            "target not a string": '{"roles": {"r": 1}}',
+            "target unsafe": '{"roles": {"r": "../x"}}',
+            "target dot git": '{"roles": {"r": ".git/x"}}',
+            "target backslash": '{"roles": {"r": "agents\\\\a.md"}}',
+            "target with colon": '{"roles": {"r": "agents/a:b.md"}}',
+            "target missing": '{"roles": {"r": "agents/missing.md"}}',
+            "target a directory": '{"roles": {"r": "agents"}}',
+            "too many roles": json_roles(17),
+            "too large": '{"roles": {}, "pad": "%s"}' % ("x" * 17000),
+        }
+        for label, text in cases.items():
+            with self.subTest(label=label):
+                self.tmp.cleanup()
+                self.setUp()
+                self.put("agents/a.md", "a\n")
+                self.put("harness.json", text)
+                self.refused("harness.json")
+
+    def test_a_role_may_map_to_a_root_file(self):
+        self.put("root/CLAUDE.md", "x\n")
+        self.put("harness.json", '{"roles": {"entry": "root/CLAUDE.md"}}')
+        self.assertIn("CLAUDE.md", self.read()[0])
+
+    def test_harness_json_exactly_at_its_limits_is_accepted_and_not_installed(self):
+        self.put("agents/a.md", "a\n")
+        self.put("harness.json", json_roles(16))
+        files, _ = self.read()
+        self.assertNotIn(".claude/harness.json", files)
+        self.assertEqual(list(files), [".claude/agents/a.md"])
+
+    def test_path_rules(self):
+        for rel in ("skills/x/.git/y.md", "skills/x/a\\b.md", "skills/x/a:b.md",
+                    "skills/" + "/".join("d" * 1 for _ in range(8)) + "/f.md"):
+            with self.subTest(rel=rel):
+                self.tmp.cleanup()
+                self.setUp()
+                self.put(rel)
+                self.refused()
+
+    def test_depth_eight_is_the_limit(self):
+        self.put("skills/x/a/b/c/d/e/f.md")  # 8 components
+        self.assertIn(".claude/skills/x/a/b/c/d/e/f.md", self.read()[0])
+
+    def test_fold_orders_nfc_casefold_nfc(self):
+        self.assertEqual(install.fold("Ϊ́"), install.fold("ΐ"))
+        self.assertEqual(install.fold("Skills/É"), install.fold("skills/é"))
+
+    def test_aliases_are_refused(self):
+        with self.assertRaises(install.InstallError):
+            install.check_unique(["skills/Foo/SKILL.md", "skills/foo/SKILL.md"])
+        with self.assertRaises(install.InstallError):
+            install.check_unique(["skills/é/SKILL.md", "skills/é/SKILL.md"])
+        with self.assertRaises(install.InstallError):
+            install.check_unique(["skills/ΐ/SKILL.md", "skills/Ϊ́/SKILL.md"])
+        install.check_unique(["skills/a/SKILL.md", "skills/b/SKILL.md"])
+
+    def test_symlink_and_fifo_in_the_tree_are_refused(self):
+        self.put("skills/x/SKILL.md", self.SKILL)
+        base = os.path.join(self.module["path"], "harness", "claude", "skills", "x")
+        os.symlink("SKILL.md", os.path.join(base, "link.md"))
+        self.refused("symlink")
+        os.unlink(os.path.join(base, "link.md"))
+        os.mkfifo(os.path.join(base, "fifo.md"))
+        self.refused("not a regular file")
+
+    def test_count_limits_abort_before_any_file_is_read(self):
+        for n in range(129):
+            self.put("skills/s/f%03d.md" % n)
+        with unittest.mock.patch.object(install, "read_regular") as reader:
+            self.refused("128")
+        reader.assert_not_called()
+
+    def test_one_hundred_twenty_eight_files_are_accepted(self):
+        for n in range(128):
+            self.put("skills/s/f%03d.md" % n)
+        self.assertEqual(len(self.read()[0]), 128)
+
+    def test_a_directory_with_too_many_entries_is_refused_before_reading(self):
+        base = os.path.join(self.module["path"], "harness", "claude", "skills")
+        os.makedirs(base)
+        for n in range(129):
+            os.mkdir(os.path.join(base, "d%03d" % n))
+        with unittest.mock.patch.object(install, "read_regular") as reader:
+            self.refused("128")
+        reader.assert_not_called()
+
+    def test_file_size_limits(self):
+        self.put("skills/x/big.md", "a" * (256 * 1024 + 1))
+        self.refused("256")
+        self.tmp.cleanup()
+        self.setUp()
+        self.put("skills/x/ok.md", "a" * (256 * 1024))
+        self.assertEqual(len(self.read()[0]), 1)
+
+    def test_tree_size_limit(self):
+        for n in range(9):
+            self.put("skills/x/f%d.md" % n, "a" * (250 * 1024))
+        self.refused("2 MiB")
+
+    def test_files_must_be_utf8_text_without_nul(self):
+        for data in (b"a\0b", b"\xff\xfe", ):
+            with self.subTest(data=data):
+                self.tmp.cleanup()
+                self.setUp()
+                self.put("skills/x/f.md", data)
+                self.refused("text")
+
+    def test_marker_strings_are_refused(self):
+        for text in ("@module-slot: a", "<!-- BEGIN module:x slot:y -->", "END module:x"):
+            with self.subTest(text=text):
+                self.tmp.cleanup()
+                self.setUp()
+                self.put("skills/x/f.md", "line\n" + text + "\n")
+                self.refused("marker")
+
+    def test_installed_path_equal_to_a_reserved_path_is_refused(self):
+        self.put("root/CLAUDE.md", "x\n")
+        with self.assertRaises(install.InstallError) as ctx:
+            self.read(reserved={install.fold("claude.md")})
+        self.assertIn("CLAUDE.md", str(ctx.exception))
+        self.read(reserved={"unrelated"})
+
+    def test_frontmatter_name_and_unit_name_defaults(self):
+        self.put("skills/dir/SKILL.md", "---\ndescription: d\n---\nbody\n")
+        self.put("agents/a.md", "---\nname: renamed\n---\nb\n")
+        self.put("commands/plain.md", "no frontmatter\n")
+        _, units = self.read()
+        self.assertEqual(units, {".claude/skills/dir": "dir", ".claude/agents/a.md": "renamed",
+                                 ".claude/commands/plain.md": "plain"})
+
+    def test_two_units_with_the_same_name_are_refused(self):
+        self.put("skills/one/SKILL.md", "---\nname: same\n---\n")
+        self.put("agents/two.md", "---\nname: Same\n---\n")
+        self.refused("same")
+
+
+def json_roles(count):
+    return json.dumps({"roles": {"role-%d" % n: "agents/a.md" for n in range(count)}})
+
+
+SHA = "a" * 64
+
+
+class HarnessManifestTest(unittest.TestCase):
+    """Plan 0018 increment B: the manifest record (specification, "Manifest")."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.project = self.tmp.name
+
+    def manifest(self, **changes):
+        data = {"schema": 2, "template_commit": None, "template_dirty": False,
+                "modules": ["demo", "other"], "harness": "claude",
+                "harness_files": {".claude/skills/x/SKILL.md": {"sha256": SHA, "modules": ["demo"]}}}
+        data.update(changes)
+        for key in [k for k, v in data.items() if v is DROP]:
+            del data[key]
+        return data
+
+    def load(self, data):
+        with open(os.path.join(self.project, ".template-manifest"), "w") as handle:
+            json.dump(data, handle)
+        return install.load_manifest(self.project, set())
+
+    def refused(self, data):
+        with self.assertRaises(install.InstallError) as ctx:
+            self.load(data)
+        return str(ctx.exception)
+
+    def files(self, mapping):
+        return self.manifest(harness_files=mapping)
+
+    def test_a_valid_record_loads(self):
+        loaded = self.load(self.manifest())
+        self.assertEqual(loaded["harness"], "claude")
+
+    def test_an_empty_record_is_valid_with_a_harness(self):
+        self.assertEqual(self.load(self.manifest(harness_files={}))["harness_files"], {})
+
+    def test_schema_one_without_harness_keys_still_loads(self):
+        data = self.manifest(schema=1, harness=DROP, harness_files=DROP)
+        self.assertEqual(self.load(data)["schema"], 1)
+
+    def test_schema_and_keys_must_agree(self):
+        self.refused(self.manifest(harness=DROP, harness_files=DROP))  # schema 2, no harness
+        self.refused(self.manifest(harness_files=DROP))                 # schema 2, no record
+        self.refused(self.manifest(schema=1))                           # schema 1 with harness
+        self.refused(self.manifest(schema=1, harness=DROP))             # schema 1 with record
+        self.refused(self.manifest(schema=True))
+        self.refused(self.manifest(schema=3))
+        self.refused(self.manifest(schema=2.0))
+
+    def test_harness_must_be_a_known_name(self):
+        for value in ("opencode", "", 1, None, ["claude"], "Claude"):
+            with self.subTest(value=value):
+                self.refused(self.manifest(harness=value))
+
+    def test_keys_must_be_destinations_of_the_harness(self):
+        good = {"sha256": SHA, "modules": ["demo"]}
+        for key in ("README.md", ".claude/settings.json", "src/main.py", ".template-manifest",
+                    "/abs/x", "../x", ".claude/../x", ".claude/skills",
+                    ".claude/hooks/x.sh", ".claude/remote-runner.toml/x", "CLAUDE.md/x",
+                    ".claude/skills/.git/x", ".claude\\skills\\x\\f.md", "",
+                    ".claude/skills/" + "a" * 260):
+            with self.subTest(key=key):
+                self.refused(self.files({key: good}))
+        for key in ("CLAUDE.md", ".claude/remote-runner.toml", ".claude/skills/x/SKILL.md",
+                    ".claude/skills/loose.md", ".claude/agents/a.md", ".claude/commands/c.md"):
+            with self.subTest(key=key):
+                self.load(self.files({key: good}))
+
+    def test_case_and_unicode_duplicate_keys_are_refused(self):
+        good = {"sha256": SHA, "modules": ["demo"]}
+        self.refused(self.files({".claude/skills/x/SKILL.md": good, ".claude/skills/X/SKILL.md": good}))
+        self.refused(self.files({".claude/skills/é/a.md": good, ".claude/skills/é/a.md": good}))
+
+    def test_values_must_be_exact(self):
+        key = ".claude/skills/x/SKILL.md"
+        bad = [
+            {"sha256": SHA}, {"modules": ["demo"]}, {"sha256": SHA, "modules": ["demo"], "x": 1},
+            {"sha256": "A" * 64, "modules": ["demo"]}, {"sha256": "a" * 63, "modules": ["demo"]},
+            {"sha256": 1, "modules": ["demo"]}, {"sha256": SHA, "modules": []},
+            {"sha256": SHA, "modules": "demo"}, {"sha256": SHA, "modules": ["other", "demo"]},
+            {"sha256": SHA, "modules": ["demo", "demo"]}, {"sha256": SHA, "modules": ["missing"]},
+            {"sha256": SHA, "modules": ["Bad Name"]}, {"sha256": SHA, "modules": [1]},
+            [], "x", None,
+        ]
+        for value in bad:
+            with self.subTest(value=value):
+                self.refused(self.files({key: value}))
+
+    def test_a_supplier_may_be_an_external_module(self):
+        data = self.manifest(
+            external_modules={"my_kb": {"module_format": 1, "digest": SHA}},
+            harness_files={".claude/skills/x/SKILL.md": {"sha256": SHA, "modules": ["my_kb"]}})
+        self.load(data)
+
+    def test_record_size_limits(self):
+        good = {"sha256": SHA, "modules": ["demo"]}
+        many = {".claude/skills/s/f%04d.md" % n: good for n in range(4001)}
+        self.refused(self.files(many))
+        exact = {".claude/skills/s/f%04d.md" % n: good for n in range(4000)}
+        self.load(self.files(exact))
+        wide = {".claude/skills/" + ("k%d" % n).ljust(250, "x"): good for n in range(2200)}
+        self.assertGreater(len(json.dumps(wide)), 512 * 1024)
+        self.refused(self.files(wide))
+
+    def test_a_manifest_over_the_limit_is_refused_before_writing(self):
+        manifest = self.manifest(file_bases={"f%d" % n: None for n in range(10000)},
+                                 project_name="p" * 200)
+        manifest["module_info"] = {}
+        manifest["pad"] = "x" * install.MAX_MANIFEST_BYTES
+        with self.assertRaises(install.InstallError):
+            install.encode_manifest(manifest)
+        self.assertEqual(install.encode_manifest({"schema": 1})[-1:], b"\n")
+
+    def test_manifest_bytes_writes_schema_two_only_with_a_harness(self):
+        plain = json.loads(install.manifest_bytes(["demo"], None, False))
+        self.assertEqual(plain["schema"], 1)
+        self.assertNotIn("harness", plain)
+        record = {".claude/agents/a.md": {"sha256": SHA, "modules": ["demo"]}}
+        withh = json.loads(install.manifest_bytes(["demo"], None, False, harness="claude",
+                                                  harness_files=record))
+        self.assertEqual((withh["schema"], withh["harness"], withh["harness_files"]),
+                         (2, "claude", record))
+        empty = json.loads(install.manifest_bytes(["demo"], None, False, harness="claude",
+                                                  harness_files={}))
+        self.assertEqual(empty["harness_files"], {})
+
+
+DROP = object()
+
+
+class HarnessCase(ProjectCase):
+    """Fixture built-in modules with harness directories (plan 0018)."""
+
+    SKILL = "---\nname: x\ndescription: d\n---\nSkill body for REPLACE_WITH_PROJECT_NAME\n"
+
+    def setUp(self):
+        super().setUp()
+        self.mods = os.path.join(self.work, "hmods")
+        os.makedirs(self.mods)
+        saved = install.MODULES_DIR
+        install.MODULES_DIR = self.mods
+        self.addCleanup(setattr, install, "MODULES_DIR", saved)
+
+    def module(self, name, harness=None, files=None, **meta):
+        base = os.path.join(self.mods, name)
+        os.makedirs(base, exist_ok=True)
+        with open(os.path.join(base, "module.json"), "w") as handle:
+            json.dump(dict({"description": name}, **meta), handle)
+        for kind, tree in (("harness/claude", harness or {}), ("files", files or {})):
+            for rel, text in tree.items():
+                full = os.path.join(base, *kind.split("/"), *rel.split("/"))
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "wb") as handle:
+                    handle.write(text if isinstance(text, bytes) else text.encode("utf-8"))
+
+    def demo(self):
+        self.module("demo", harness={
+            "skills/x/SKILL.md": self.SKILL,
+            "agents/a.md": "---\nname: agent-a\n---\nagent\n",
+            "commands/c.md": "command\n",
+            "root/CLAUDE.md": "@AGENTS.md\n",
+        })
+
+    def new_h(self, with_, *extra):
+        return run([self.target(), "--with", with_, "--git-name", "Test User",
+                    "--git-email", "tester@users.noreply.example.invalid", *extra])
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def add(self, *names, extra=()):
+        return run(["--add", *names, "--dir", self.target(), *extra])
+
+    def set_manifest(self, **changes):
+        data = self.manifest()
+        data.update(changes)
+        self.write(".template-manifest", json.dumps(data))
+
+    def sha(self, rel):
+        import hashlib
+        with open(self.path(rel), "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()
+
+    def project_with(self, **modules):
+        for name, harness in modules.items():
+            self.module(name, harness=harness)
+        self.assertEqual(self.new_h(",".join(modules), "--harness", "claude")[0], 0)
+
+
+class HarnessAddUpdateTest(HarnessCase):
+    """Plan 0018 increment D: --harness with --add and --update."""
+
+    # -- the command matrix --------------------------------------------
+
+    def test_add_activates_a_harness_for_every_installed_module(self):
+        self.demo()
+        self.module("other", harness={"agents/o.md": "other\n"})
+        self.module("plain")
+        self.assertEqual(self.new_h("demo,plain")[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        code, out, err = self.add("other", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        manifest = self.manifest()
+        self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
+        self.assertEqual(sorted(manifest["harness_files"]), [
+            ".claude/agents/a.md", ".claude/agents/o.md", ".claude/commands/c.md",
+            ".claude/skills/x/SKILL.md", "CLAUDE.md"])
+        self.assertIn("plain: no claude files", out)
+
+    def test_add_uses_the_recorded_harness_and_refuses_a_different_one(self):
+        self.demo()
+        self.module("other", harness={"agents/o.md": "other\n"})
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        before = self.read(".template-manifest")
+        code, out, err = self.add("other", extra=["--harness", "opencode"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read(".template-manifest"), before)
+        self.assertFalse(os.path.exists(self.path(".claude/agents/o.md")))
+        self.assertEqual(self.add("other")[0], 0)
+        self.assertIn(".claude/agents/o.md", self.manifest()["harness_files"])
+
+    def test_add_with_the_same_value_installs_the_new_module(self):
+        self.demo()
+        self.module("other", harness={"agents/o.md": "other\n"})
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        self.assertEqual(self.add("other", extra=["--harness", "claude"])[0], 0)
+        self.assertTrue(os.path.exists(self.path(".claude/agents/o.md")))
+
+    def test_add_without_a_harness_installs_only_the_neutral_part(self):
+        self.demo()
+        self.module("other", harness={"agents/o.md": "other\n"}, files={"n.txt": "n\n"})
+        self.assertEqual(self.new_h("demo")[0], 0)
+        self.assertEqual(self.add("other")[0], 0)
+        self.assertEqual(self.read("n.txt"), "n\n")
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertNotIn("harness", self.manifest())
+
+    def test_unknown_harness_value_is_refused_before_any_write(self):
+        self.demo()
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        before = self.read(".template-manifest")
+        for value in ("nope", "x" * 40):
+            code, out, err = self.add("other", extra=["--harness", value])
+            self.assertEqual(code, 2)
+            self.assertNotIn("x" * 40, err)
+        self.assertEqual(self.read(".template-manifest"), before)
+
+    def test_update_never_introduces_a_harness(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo")[0], 0)
+        self.assertEqual(self.update()[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        before = self.read(".template-manifest")
+        code, out, err = self.update("--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read(".template-manifest"), before)
+
+    def test_update_accepts_only_the_recorded_harness(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        self.assertEqual(self.update("--harness", "claude")[0], 0)
+        self.assertEqual(self.update("--harness", "opencode")[0], 2)
+        self.assertEqual(self.update("--harness", "x" * 40)[0], 2)
+
+    def test_the_activation_names_an_external_module_it_does_not_read(self):
+        self.demo()
+        store = make_store(self.work, name="my_kb")
+        self.assertEqual(self.new_h("demo,my_kb=" + store)[0], 0)
+        self.module("other")
+        code, out, err = self.add("other", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("my_kb", out)
+        self.assertEqual(self.manifest()["harness"], "claude")
+
+    # -- collisions against existing files -----------------------------
+
+    def activate_over(self, files):
+        self.demo()
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(self.path(rel)), exist_ok=True)
+            self.write(rel, text)
+        return self.add("other", extra=["--harness", "claude"])
+
+    def test_a_new_path_is_written_and_an_identical_one_adopted(self):
+        code, out, err = self.activate_over({"CLAUDE.md": "@AGENTS.md\n"})
+        self.assertEqual(code, 0, err)
+        record = self.manifest()["harness_files"]
+        self.assertEqual(record["CLAUDE.md"]["modules"], ["demo"])
+        self.assertIn(".claude/agents/a.md", record)
+        self.assertNotIn("conflict", out)
+
+    def test_a_differing_file_is_a_conflict_and_is_not_recorded(self):
+        code, out, err = self.activate_over({".claude/commands/c.md": "mine\n"})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/commands/c.md"), "mine\n")
+        self.assertIn("conflict .claude/commands/c.md", out)
+        self.assertIn("1 conflict(s)", out)
+        self.assertNotIn(".claude/commands/c.md", self.manifest()["harness_files"])
+        self.assertIn(".claude/agents/a.md", self.manifest()["harness_files"])
+
+    def test_a_skill_unit_with_a_conflicting_file_is_skipped_whole(self):
+        self.demo()
+        self.module("demo", harness={
+            "skills/x/SKILL.md": self.SKILL, "skills/x/extra.md": "extra\n",
+            "agents/a.md": "agent\n"})
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        os.makedirs(self.path(".claude/skills/x"))
+        self.write(".claude/skills/x/extra.md", "mine\n")
+        code, out, err = self.add("other", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(self.path(".claude/skills/x/SKILL.md")))
+        record = self.manifest()["harness_files"]
+        self.assertFalse([k for k in record if k.startswith(".claude/skills/x")])
+        self.assertIn(".claude/agents/a.md", record)
+
+    def test_extra_files_in_a_skill_directory_are_left_alone(self):
+        self.demo()
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        os.makedirs(self.path(".claude/skills/x"))
+        self.write(".claude/skills/x/mine.md", "mine\n")
+        code, out, err = self.add("other", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("conflict", out)
+        self.assertEqual(self.read(".claude/skills/x/mine.md"), "mine\n")
+        self.assertTrue(os.path.exists(self.path(".claude/skills/x/SKILL.md")))
+
+    def test_a_symlink_or_a_directory_at_a_destination_is_a_conflict(self):
+        self.demo()
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        os.makedirs(self.path(".claude/agents"))
+        os.symlink(os.path.join(self.work, "elsewhere"), self.path(".claude/agents/a.md"))
+        os.makedirs(self.path(".claude/commands/c.md"))
+        refused = self.add("other", extra=["--harness", "claude"])
+        self.assertEqual(refused[0], 2)  # the project scan refuses the symlink
+        code, out, err = self.add("other", extra=["--harness", "claude", "--skip-unsafe-entries"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict .claude/agents/a.md", out)
+        self.assertIn("conflict .claude/commands/c.md", out)
+        self.assertTrue(os.path.islink(self.path(".claude/agents/a.md")))
+        record = self.manifest()["harness_files"]
+        self.assertNotIn(".claude/agents/a.md", record)
+        self.assertNotIn(".claude/commands/c.md", record)
+
+    def test_a_case_alias_is_a_conflict(self):
+        self.demo()
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        self.write("Claude.md", "alias\n")
+        code, out, err = self.add("other", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict CLAUDE.md", out)
+        self.assertNotIn("CLAUDE.md", self.manifest()["harness_files"])
+
+    def test_add_dry_run_writes_nothing(self):
+        self.demo()
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        before = self.read(".template-manifest")
+        code, out, err = self.add("other", extra=["--harness", "claude", "--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("would write .claude/agents/a.md", out)
+        self.assertEqual(self.read(".template-manifest"), before)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+
+    # -- --update ------------------------------------------------------
+
+    def test_update_replaces_an_unedited_file_and_updates_its_hash(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        self.module("demo", harness={"agents/a.md": "v2\n"})
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/agents/a.md"), "v2\n")
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["sha256"],
+                         self.sha(".claude/agents/a.md"))
+
+    def test_update_keeps_an_edited_file_and_reports_it(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        self.write(".claude/agents/a.md", "mine\n")
+        recorded = self.manifest()["harness_files"]
+        self.module("demo", harness={"agents/a.md": "v2\n"})
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/agents/a.md"), "mine\n")
+        self.assertIn("conflict .claude/agents/a.md", out)
+        self.assertEqual(self.manifest()["harness_files"], recorded)
+
+    def test_update_moves_co_suppliers_only_together(self):
+        self.project_with(one={"agents/a.md": "v1\n"}, two={"agents/a.md": "v1\n"})
+        self.module("one", harness={"agents/a.md": "v2\n"})
+        code, out, err = self.update("one")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/agents/a.md"), "v1\n")
+        self.assertIn("conflict", out)
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["sha256"],
+                         self.sha(".claude/agents/a.md"))
+        self.module("two", harness={"agents/a.md": "v2\n"})
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/agents/a.md"), "v2\n")
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["modules"],
+                         ["one", "two"])
+
+    def test_update_adopts_new_bytes_after_an_interruption(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        self.module("demo", harness={"agents/a.md": "v2\n"})
+        self.write(".claude/agents/a.md", "v2\n")  # written, but the manifest still says v1
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("conflict", out)
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["sha256"],
+                         self.sha(".claude/agents/a.md"))
+        code, out, err = self.update()
+        self.assertIn("Nothing to update", out)
+
+    def test_update_writes_a_newly_shipped_file_and_never_deletes_a_dropped_one(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        self.module("demo", harness={"agents/b.md": "new\n"})
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/agents/b.md"), "new\n")
+        self.assertEqual(self.read(".claude/agents/a.md"), "v1\n")
+        record = self.manifest()["harness_files"]
+        self.assertIn(".claude/agents/a.md", record)
+        self.assertIn(".claude/agents/b.md", record)
+
+    def test_update_rewrites_a_missing_recorded_file(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        os.unlink(self.path(".claude/agents/a.md"))
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(self.read(".claude/agents/a.md"), "v1\n")
+
+    def test_update_dry_run_writes_nothing(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        self.module("demo", harness={"agents/a.md": "v2\n"})
+        before = self.read(".template-manifest")
+        code, out, err = self.update("--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would write .claude/agents/a.md", out)
+        self.assertEqual(self.read(".claude/agents/a.md"), "v1\n")
+        self.assertEqual(self.read(".template-manifest"), before)
+
+    def test_update_files_are_created_644(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        os.chmod(self.path(".claude/agents/a.md"), 0o755)
+        self.module("demo", harness={"agents/a.md": "v2\n"})
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(os.stat(self.path(".claude/agents/a.md")).st_mode & 0o777, 0o644)
+
+
+class HarnessRemoveTest(HarnessCase):
+    """Plan 0018 increment E: --remove of modules that supplied harness files."""
+
+    def remove(self, *names, extra=()):
+        return run(["--remove", *names, "--dir", self.target(), *extra])
+
+    def test_a_sole_supplier_is_deleted_with_its_emptied_directories(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        code, out, err = self.remove("demo")
+        self.assertEqual(code, 0, err)
+        for rel in (".claude", "CLAUDE.md"):
+            self.assertFalse(os.path.exists(self.path(rel)), rel)
+        manifest = self.manifest()
+        self.assertEqual((manifest["schema"], manifest["harness"], manifest["harness_files"]),
+                         (2, "claude", {}))
+
+    def test_an_edited_file_is_kept_and_its_record_dropped(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        self.write(".claude/commands/c.md", "mine\n")
+        code, out, err = self.remove("demo")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/commands/c.md"), "mine\n")
+        self.assertIn("kept .claude/commands/c.md", out)
+        self.assertEqual(self.manifest()["harness_files"], {})
+        self.assertFalse(os.path.exists(self.path(".claude/agents/a.md")))
+
+    def test_a_missing_file_only_drops_its_record(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        os.unlink(self.path(".claude/commands/c.md"))
+        self.assertEqual(self.remove("demo")[0], 0)
+        self.assertEqual(self.manifest()["harness_files"], {})
+
+    def test_a_co_supplied_file_stays_until_its_last_supplier_goes(self):
+        self.project_with(one={"agents/a.md": "same\n"}, two={"agents/a.md": "same\n"})
+        self.assertEqual(self.remove("one")[0], 0)
+        self.assertEqual(self.read(".claude/agents/a.md"), "same\n")
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["modules"], ["two"])
+        self.assertEqual(self.remove("two")[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude/agents/a.md")))
+
+    def test_a_path_a_remaining_module_ships_is_never_deleted(self):
+        self.module("one", harness={"agents/a.md": "same\n"})
+        self.module("two")
+        self.assertEqual(self.new_h("one,two", "--harness", "claude")[0], 0)
+        self.module("two", files={".claude/agents/a.md": "same\n"})
+        code, out, err = self.remove("one")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/agents/a.md"), "same\n")
+        self.assertNotIn(".claude/agents/a.md", self.manifest()["harness_files"])
+
+    def test_a_forged_record_deletes_only_a_matching_regular_file(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        os.makedirs(self.path(".claude/agents"), exist_ok=True)
+        self.write(".claude/agents/mine.md", "user file\n")
+        record = self.manifest()["harness_files"]
+        record[".claude/agents/mine.md"] = {"sha256": "0" * 64, "modules": ["demo"]}
+        self.set_manifest(harness_files=record)
+        self.assertEqual(self.remove("demo")[0], 0)
+        self.assertEqual(self.read(".claude/agents/mine.md"), "user file\n")
+
+    def test_a_forged_key_outside_the_harness_is_refused_untouched(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        record = self.manifest()["harness_files"]
+        record["README.md"] = {"sha256": self.sha("CLAUDE.md"), "modules": ["demo"]}
+        self.set_manifest(harness_files=record)
+        before = self.read("AGENTS.md")
+        code, out, err = self.remove("demo")
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read("AGENTS.md"), before)
+        self.assertTrue(os.path.exists(self.path(".claude/agents/a.md")))
+
+    def test_a_directory_valued_record_does_not_block_the_run(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        os.makedirs(self.path(".claude/agents/folder"))
+        record = self.manifest()["harness_files"]
+        record[".claude/agents/folder"] = {"sha256": "0" * 64, "modules": ["demo"]}
+        self.set_manifest(harness_files=record)
+        code, out, err = self.remove("demo")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(os.path.isdir(self.path(".claude/agents/folder")))
+        self.assertNotIn(".claude/agents/folder", self.manifest()["harness_files"])
+
+    def test_removal_reads_no_harness_tree(self):
+        self.demo()
+        self.module("other", harness={"agents/o.md": "o\n"})
+        self.assertEqual(self.new_h("demo,other", "--harness", "claude")[0], 0)
+        self.module("other", harness={"hooks/run.sh": "bad\n"})  # a tree that would now be refused
+        code, out, err = self.remove("demo")
+        self.assertEqual(code, 0, err)
+        self.assertIn(".claude/agents/o.md", self.manifest()["harness_files"])
+
+    def test_remove_dry_run_changes_nothing(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        before = self.read(".template-manifest")
+        code, out, err = self.remove("demo", extra=["--dry-run"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("would delete .claude/agents/a.md", out)
+        self.assertTrue(os.path.exists(self.path(".claude/agents/a.md")))
+        self.assertEqual(self.read(".template-manifest"), before)
+
+    def test_a_project_without_a_harness_is_removed_as_before(self):
+        self.demo()
+        self.module("plain")
+        self.assertEqual(self.new_h("demo,plain")[0], 0)
+        self.assertEqual(self.remove("plain")[0], 0)
+        self.assertNotIn("harness", self.manifest())
+
+
+class HarnessFindingsTest(HarnessCase):
+    """Plan 0018 increment G: regression tests for the adversarial review's findings."""
+
+    def test_remove_does_not_delete_a_path_twice(self):
+        self.module("m", files={".claude/agents/x.md": "x\n"})
+        self.assertEqual(self.new_h("m", "--harness", "claude")[0], 0)
+        record = self.manifest()["harness_files"]
+        record[".claude/agents/x.md"] = {"sha256": self.sha(".claude/agents/x.md"), "modules": ["m"]}
+        self.set_manifest(harness_files=record)
+        code, out, err = run(["--remove", "m", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertFalse(os.path.exists(self.path(".claude/agents/x.md")))
+        self.assertEqual(self.manifest()["modules"], [])
+
+    def test_a_too_long_installed_path_is_refused_at_install(self):
+        self.module("long", harness={"skills/%s/SKILL.md" % ("a" * 240): "x\n"})
+        code, out, err = self.new_h("long", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn("256", err)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_the_writer_enforces_the_record_limits(self):
+        good = {"sha256": SHA, "modules": ["demo"]}
+        many = {".claude/skills/s/f%04d.md" % n: good for n in range(4001)}
+        with self.assertRaises(install.InstallError):
+            install.encode_manifest({"schema": 2, "harness": "claude", "harness_files": many})
+        with self.assertRaises(install.InstallError):
+            install.encode_manifest({"schema": 2, "harness": "claude",
+                                     "harness_files": {".claude/agents/" + "a" * 250: good}})
+        install.encode_manifest({"schema": 2, "harness": "claude", "modules": ["demo"],
+                                 "harness_files": {".claude/agents/a.md": good}})
+
+    def test_aliases_between_modules_fail_before_any_write(self):
+        self.module("m1", harness={"skills/Foo/SKILL.md": "---\nname: foo-a\n---\n"})
+        self.module("m2", harness={"skills/foo/SKILL.md": "---\nname: foo-b\n---\n"})
+        code, out, err = self.new_h("m1,m2", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn("folding", err)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_a_path_any_installed_module_ships_is_reserved(self):
+        self.module("owner", files={"CLAUDE.md": "mine\n"})
+        self.module("late", harness={"root/CLAUDE.md": "theirs\n"})
+        self.assertEqual(self.new_h("owner", "--harness", "claude")[0], 0)
+        before = self.read(".template-manifest")
+        code, out, err = run(["--add", "late", "--dir", self.target()])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.read(".template-manifest"), before)
+        self.assertEqual(self.read("CLAUDE.md"), "mine\n")
+
+    def test_an_unknown_or_symlinked_harness_directory_is_refused_without_the_option(self):
+        self.module("odd")
+        os.makedirs(os.path.join(self.mods, "odd", "harness", "other"))
+        code, out, err = self.new_h("odd")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+        self.module("linked")
+        os.makedirs(os.path.join(self.work, "elsewhere"))
+        os.symlink(os.path.join(self.work, "elsewhere"), os.path.join(self.mods, "linked", "harness"))
+        code, out, err = self.new_h("linked")
+        self.assertEqual(code, 2)
+        self.module("plain")
+        self.assertEqual(self.new_h("plain")[0], 0)
+        code, out, err = run(["--add", "odd", "--dir", self.target()])
+        self.assertEqual(code, 2)
+
+    def test_remove_ignores_markers_in_kept_harness_files(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        self.write(".claude/commands/c.md", "<!-- BEGIN module:demo slot:x -->\nmine\n")
+        code, out, err = run(["--remove", "demo", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertIn("mine", self.read(".claude/commands/c.md"))
+
+    def test_markers_formed_by_substitution_are_refused(self):
+        self.module("m", harness={"agents/a.md": "REPLACE_WITH_PROJECT_NAME:x slot:y\n"})
+        code, out, err = self.new_h("m", "--harness", "claude", "--name", "BEGIN module")
+        self.assertEqual(code, 2)
+        self.assertIn("marker", err)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_a_rewritten_path_keeps_its_other_recorded_suppliers(self):
+        self.project_with(one={"agents/a.md": "same\n"}, two={"agents/a.md": "same\n"})
+        os.unlink(self.path(".claude/agents/a.md"))
+        self.assertEqual(self.update("one")[0], 0)
+        self.assertEqual(self.read(".claude/agents/a.md"), "same\n")
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["modules"],
+                         ["one", "two"])
+
+    def test_read_regular_never_returns_more_than_its_limit(self):
+        path = os.path.join(self.work, "grown")
+        with open(path, "wb") as handle:
+            handle.write(b"x" * 100)
+        real = os.lstat(path)
+        small = unittest.mock.Mock(st_mode=real.st_mode, st_size=10)
+        with unittest.mock.patch.object(install.os, "lstat", return_value=small):
+            with self.assertRaises(install.InstallError):
+                install.read_regular(path, 50)
+        self.assertEqual(install.read_regular(path, 100), b"x" * 100)
+
+
+class HarnessSecondPassTest(HarnessCase):
+    """Plan 0018 increment G: the second review pass, and the coverage it found missing."""
+
+    def interrupt_manifest_write(self):
+        """Make the manifest rename fail, after every other file was written."""
+        real = install.os.replace
+
+        def failing(src, dst, *args, **kwargs):
+            if os.path.basename(dst) == ".template-manifest":
+                raise OSError(5, "simulated kill")
+            return real(src, dst, *args, **kwargs)
+
+        return unittest.mock.patch.object(install.os, "replace", side_effect=failing)
+
+    def test_a_stale_record_key_cannot_alias_a_new_path(self):
+        self.module("r", harness={"agents/X.md": "v1\n"})
+        self.assertEqual(self.new_h("r", "--harness", "claude")[0], 0)
+        os.unlink(self.path(".claude/agents/X.md"))
+        source = os.path.join(self.mods, "r", "harness", "claude", "agents")
+        os.rename(os.path.join(source, "X.md"), os.path.join(source, "x.md"))  # the module renames it
+        with open(os.path.join(source, "x.md"), "w") as handle:
+            handle.write("v2\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict .claude/agents/x.md", out)
+        keys = list(self.manifest()["harness_files"])
+        self.assertEqual(keys, [".claude/agents/X.md"])
+        self.assertEqual(self.update()[0], 0)  # the project is not wedged
+
+    def test_the_writer_refuses_a_record_the_loader_would_refuse(self):
+        good = {"sha256": SHA, "modules": ["demo"]}
+        aliased = {".claude/agents/X.md": good, ".claude/agents/x.md": good}
+        with self.assertRaises(install.InstallError):
+            install.encode_manifest({"schema": 2, "harness": "claude", "modules": ["demo"],
+                                     "harness_files": aliased})
+
+    def test_a_forged_record_does_not_delete_a_file_the_files_rule_kept(self):
+        self.module("m", files={".claude/agents/y.md": "orig\n"})
+        self.assertEqual(self.new_h("m", "--harness", "claude")[0], 0)
+        self.write(".claude/agents/y.md", "edited\n")
+        record = self.manifest()["harness_files"]
+        record[".claude/agents/y.md"] = {"sha256": self.sha(".claude/agents/y.md"), "modules": ["m"]}
+        self.set_manifest(harness_files=record)
+        code, out, err = run(["--remove", "m", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/agents/y.md"), "edited\n")
+
+    def test_an_interrupted_update_reruns_to_a_consistent_state(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        self.module("demo", harness={"agents/a.md": "v2\n"})
+        with self.interrupt_manifest_write():
+            self.assertEqual(self.update()[0], 2)
+        self.assertEqual(self.read(".claude/agents/a.md"), "v2\n")  # written, manifest still old
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["sha256"],
+                         self.sha(".claude/agents/a.md"))
+        self.assertIn("Nothing to update", self.update()[1])
+
+    def test_an_interrupted_activation_reruns_to_a_consistent_state(self):
+        self.demo()
+        self.module("other")
+        self.assertEqual(self.new_h("demo")[0], 0)
+        with self.interrupt_manifest_write():
+            self.assertEqual(self.add("other", extra=["--harness", "claude"])[0], 2)
+        self.assertNotIn("harness", self.manifest())
+        self.assertTrue(os.path.exists(self.path(".claude/agents/a.md")))
+        code, out, err = self.add("other", extra=["--harness", "claude"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.manifest()["harness"], "claude")
+        self.assertNotIn("conflict", out)
+        self.assertIn(".claude/agents/a.md", self.manifest()["harness_files"])
+
+    def test_an_interrupted_remove_reruns_to_a_consistent_state(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        with self.interrupt_manifest_write():
+            self.assertEqual(run(["--remove", "demo", "--dir", self.target()])[0], 2)
+        self.assertEqual(self.manifest()["modules"], ["demo"])
+        code, out, err = run(["--remove", "demo", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.manifest()["harness_files"], {})
+        self.assertEqual(self.manifest()["modules"], [])
+
+    def test_update_replaces_a_setuid_file_with_a_plain_one_under_umask_zero(self):
+        self.project_with(demo={"agents/a.md": "v1\n"})
+        os.chmod(self.path(".claude/agents/a.md"), 0o4755)
+        self.module("demo", harness={"agents/a.md": "v2\n"})
+        old = os.umask(0)
+        self.addCleanup(os.umask, old)
+        self.assertEqual(self.update()[0], 0)
+        self.assertEqual(os.stat(self.path(".claude/agents/a.md")).st_mode & 0o7777, 0o644)
+
+    def test_a_bad_built_in_tree_does_not_block_list_or_remove(self):
+        self.demo()
+        self.module("plain")
+        self.assertEqual(self.new_h("demo,plain", "--harness", "claude")[0], 0)
+        os.makedirs(os.path.join(self.mods, "plain", "harness", "other"))
+        self.assertEqual(run(["--list"])[0], 0)
+        self.assertEqual(run(["--remove", "demo", "--dir", self.target()])[0], 0)
+
+    def test_an_older_installer_refuses_a_schema_two_project(self):
+        probe = subprocess.run(["git", "-C", ROOT, "cat-file", "-e", "30f08e5:install.py"],
+                               capture_output=True)
+        if probe.returncode:
+            self.skipTest("the pre-harness commit is not in this checkout")
+        old = os.path.join(self.work, "old")
+        shutil.copytree(os.path.join(ROOT, "base"), os.path.join(old, "base"))
+        shutil.copytree(os.path.join(ROOT, "modules"), os.path.join(old, "modules"))
+        source = subprocess.run(["git", "-C", ROOT, "show", "30f08e5:install.py"],
+                                capture_output=True, check=True).stdout
+        with open(os.path.join(old, "install.py"), "wb") as handle:
+            handle.write(source)
+        self.demo()
+        self.assertEqual(self.new_h("demo", "--harness", "claude")[0], 0)
+        before = self.read(".template-manifest")
+        for argv in (["--update", "--dry-run"], ["--update"], ["--add", "plain"], ["--remove", "demo"]):
+            result = subprocess.run([sys.executable, "-I", os.path.join(old, "install.py"), *argv,
+                                     "--dir", self.target()], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2, argv)
+            self.assertIn("malformed", result.stderr)
+        self.assertEqual(self.read(".template-manifest"), before)
+        self.assertTrue(os.path.exists(self.path(".claude/agents/a.md")))
+
+
+class HarnessNewProjectTest(HarnessCase):
+    """Plan 0018 increment C: --harness with a new project."""
+
+    def test_new_installs_the_units_and_records_them(self):
+        self.demo()
+        code, out, err = self.new_h("demo", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.read(".claude/skills/x/SKILL.md").splitlines()[-1],
+                         "Skill body for proj")
+        self.assertEqual(self.read(".claude/agents/a.md"), "---\nname: agent-a\n---\nagent\n")
+        self.assertEqual(self.read("CLAUDE.md"), "@AGENTS.md\n")
+        self.assertFalse(os.path.exists(self.path(".claude/harness.json")))
+        manifest = self.manifest()
+        self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
+        self.assertEqual(sorted(manifest["harness_files"]), [
+            ".claude/agents/a.md", ".claude/commands/c.md", ".claude/skills/x/SKILL.md", "CLAUDE.md"])
+        import hashlib
+        with open(self.path(".claude/skills/x/SKILL.md"), "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        self.assertEqual(manifest["harness_files"][".claude/skills/x/SKILL.md"],
+                         {"sha256": digest, "modules": ["demo"]})
+
+    def test_without_the_option_nothing_is_installed_and_the_manifest_is_unchanged(self):
+        self.demo()
+        self.assertEqual(self.new_h("demo")[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertFalse(os.path.exists(self.path("CLAUDE.md")))
+        manifest = self.manifest()
+        self.assertEqual(manifest["schema"], 1)
+        self.assertNotIn("harness", manifest)
+        self.assertNotIn("harness_files", manifest)
+
+    def test_unknown_harness_is_refused_before_anything_is_written(self):
+        self.demo()
+        for value in ("nope", "Claude", "x" * 40, ""):
+            with self.subTest(value=value):
+                code, out, err = self.new_h("demo", "--harness", value)
+                self.assertEqual(code, 2)
+                self.assertFalse(os.path.exists(self.target()))
+        self.assertNotIn("x" * 40, self.new_h("demo", "--harness", "x" * 40)[2])
+
+    def test_option_is_refused_with_the_other_actions(self):
+        self.demo()
+        for argv in (["--list", "--harness", "claude"],
+                     ["--register", self.work, "--harness", "claude"],
+                     ["--unregister", "nope", "--harness", "claude"],
+                     ["--remove", "demo", "--harness", "claude", "--dir", self.work]):
+            with self.subTest(argv=argv):
+                code, out, err = run(argv)
+                self.assertEqual(code, 2)
+                self.assertIn("--harness", err)
+
+    def test_two_modules_with_different_bytes_fail_before_any_write(self):
+        self.module("one", harness={"agents/a.md": "one\n"})
+        self.module("two", harness={"agents/a.md": "two\n"})
+        code, out, err = self.new_h("one,two", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn(".claude/agents/a.md", err)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_identical_bytes_install_once_with_both_suppliers(self):
+        self.module("one", harness={"agents/a.md": "same\n"})
+        self.module("two", harness={"agents/a.md": "same\n"})
+        self.assertEqual(self.new_h("one,two", "--harness", "claude")[0], 0)
+        self.assertEqual(self.manifest()["harness_files"][".claude/agents/a.md"]["modules"],
+                         ["one", "two"])
+
+    def test_a_skill_unit_with_different_trees_fails(self):
+        self.module("one", harness={"skills/s/SKILL.md": "---\nname: s\n---\n", "skills/s/a.md": "a\n"})
+        self.module("two", harness={"skills/s/SKILL.md": "---\nname: s\n---\n"})
+        code, out, err = self.new_h("one,two", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_two_modules_naming_different_units_the_same_fail(self):
+        self.module("one", harness={"agents/a.md": "---\nname: shared\n---\n"})
+        self.module("two", harness={"agents/b.md": "---\nname: Shared\n---\n"})
+        code, out, err = self.new_h("one,two", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn("shared", err.lower())
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_a_path_shipped_as_a_module_file_is_refused(self):
+        self.module("one", harness={"agents/a.md": "h\n"})
+        self.module("two", files={".claude/agents/a.md": "f\n"})
+        code, out, err = self.new_h("one,two", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(self.target()))
+        self.module("three", files={"claude.md": "f\n"})
+        self.module("four", harness={"root/CLAUDE.md": "h\n"})
+        self.assertEqual(self.new_h("three,four", "--harness", "claude")[0], 2)
+
+    def test_placeholders_need_a_conservative_project_name(self):
+        self.demo()
+        code, out, err = run([os.path.join(self.work, "bad;name"), "--with", "demo",
+                              "--harness", "claude", "--git-name", "T",
+                              "--git-email", "t@users.noreply.example.invalid"])
+        self.assertEqual(code, 2)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "bad;name")))
+        self.module("plain", harness={"agents/p.md": "no placeholder\n"})
+        code, out, err = run([os.path.join(self.work, "ok;name"), "--with", "plain",
+                              "--harness", "claude", "--git-name", "T",
+                              "--git-email", "t@users.noreply.example.invalid"])
+        self.assertEqual(code, 0, err)
+
+    def test_a_module_without_the_harness_directory_keeps_its_neutral_part(self):
+        self.demo()
+        self.module("neutral", files={"notes.txt": "n\n"})
+        code, out, err = self.new_h("demo,neutral", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        self.assertIn("neutral: no claude files", out)
+        self.assertNotIn("demo: no claude files", out)
+        self.assertEqual(self.read("notes.txt"), "n\n")
+
+    def test_per_run_limits_across_modules(self):
+        for n in range(5):  # 5 x 103 files: each module is within 128, the run is over 512
+            self.module("m%d" % n, harness={"skills/s%d/f%03d.md" % (n, i): "x\n" for i in range(103)})
+        code, out, err = self.new_h("m0,m1,m2,m3,m4", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn("512", err)
+        self.assertFalse(os.path.exists(self.target()))
+        for n in range(5):  # 5 x 2 MiB: each tree is at its limit, the run is over 8 MiB
+            self.module("b%d" % n, harness={"skills/s%d/f%d.md" % (n, i): "a" * (256 * 1024)
+                                            for i in range(8)})
+        code, out, err = self.new_h("b0,b1,b2,b3,b4", "--harness", "claude")
+        self.assertEqual(code, 2)
+        self.assertIn("8 MiB", err)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_neutrality_ignores_harness_files_and_still_covers_the_rest(self):
+        self.module("tooled", harness={"agents/a.md": "uses ask-codex and second-opinion\n"},
+                    files={"notes.md": "neutral\n"})
+        self.assertEqual(self.new_h("tooled", "--harness", "claude")[0], 0)
+        self.assertIn("ask-codex", self.read(".claude/agents/a.md"))
+        self.assertEqual(neutrality_problems(self.target()), [])
+        self.module("leaky", files={"notes.md": "uses ask-codex\n"})
+        shutil.rmtree(self.target())
+        self.assertEqual(self.new_h("leaky", "--harness", "claude")[0], 0)
+        problems = neutrality_problems(self.target())
+        self.assertIn(("notes.md", "ask-codex"), problems)
+        self.assertEqual({path for path, _ in problems}, {"notes.md"})
+
+    def test_dry_run_lists_the_files_and_writes_nothing(self):
+        self.demo()
+        code, out, err = self.new_h("demo", "--harness", "claude", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would write .claude/skills/x/SKILL.md", out)
+        self.assertIn("would write CLAUDE.md", out)
+        self.assertFalse(os.path.exists(self.target()))
+
+    def test_files_are_created_644_and_never_copy_a_replaced_mode(self):
+        target = os.path.join(self.work, "wt")
+        os.makedirs(target)
+        old_umask = os.umask(0)
+        self.addCleanup(os.umask, old_umask)
+        victim = os.path.join(target, "victim")
+        with open(victim, "w") as handle:
+            handle.write("old")
+        os.chmod(victim, 0o4755)
+        install.write_tree(target, {"victim": b"new", "fresh": b"x", "plain": b"y"},
+                           private={"victim", "fresh"})
+        self.assertEqual(os.stat(victim).st_mode & 0o7777, 0o644)
+        self.assertEqual(os.stat(os.path.join(target, "fresh")).st_mode & 0o7777, 0o644)
+        self.assertEqual(os.stat(os.path.join(target, "plain")).st_mode & 0o7777, 0o666)
+        with open(os.path.join(target, "plain"), "w") as handle:
+            handle.write("old")
+        os.chmod(os.path.join(target, "plain"), 0o755)
+        install.write_tree(target, {"plain": b"z"})  # existing behaviour: the mode is kept
+        self.assertEqual(os.stat(os.path.join(target, "plain")).st_mode & 0o7777, 0o755)
 
 
 class ModuleHygieneTest(unittest.TestCase):

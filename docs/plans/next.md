@@ -1,6 +1,6 @@
 # Harness directories and --harness
 
-Status: Approved
+Status: In Progress
 Created: 2026-10-19
 
 ## Goal
@@ -264,5 +264,65 @@ Completion: the findings are decided and the suite is green.
 
 ## Result
 
-<!-- Complete this only after verification. Archive the plan according to
-docs/plans/README.md, then reset this file to the empty template. -->
+Increments A to G are implemented and verified; nothing is committed beyond the approved plan
+(`652bc6f`). 105 tests are new (`HarnessTreeTest`, `HarnessManifestTest`, `HarnessNewProjectTest`,
+`HarnessAddUpdateTest`, `HarnessRemoveTest`, `HarnessFindingsTest`, `HarnessSecondPassTest`) and the
+suite passes with 412 tests. Each new test was seen to fail first, except the coverage tests added
+after the second review for behaviour the code already had.
+
+What changed in `install.py`: the harness table (`claude`), `fold`, the built-in tree reader
+(`read_harness_tree`, `check_harness_json`, the per-module and per-run limits), the manifest record
+(`schema` 2, `harness`, `harness_files`, `validate_harness_record`, `encode_manifest` with the size
+and record checks the loader applies), `--harness` and `choose_harness`, `plan_harness` and
+`report_harness` (collision rules, update baseline, co-suppliers, unit skipping), `write_tree(private=)`
+for `0644 & ~umask`, and the harness parts of `cmd_new`, `cmd_add`, `cmd_update` and `cmd_remove`.
+`read_regular` now reads at most its limit. README documents the behaviour ("Harness files", Layout,
+Writing a module, Boundaries) and the neutrality test ignores installed harness files.
+
+Choices where the specification was silent, all following the installer's existing idiom:
+`harness.json` is validated and otherwise ignored until candidate 4; a module's `harness/` entries
+are checked whenever the module is selected, installed or updated, with or without `--harness`;
+`--add` and `--update` print `<module>: no <harness> files` for each module without a directory; a
+conflict is reported with a summary count and does not change the exit status, as for files
+`--update` keeps today; the reserved-path set covers every installed built-in module; the writer
+validates the whole harness record before writing; a path written again keeps its other recorded
+suppliers; and a stale record key that aliases a newly shipped path is a conflict.
+
+Specification erratum (committed separately from the approved text): acceptance criterion 6 said a
+forged key naming a file the module does not ship is refused on load. Load cannot tell it from a real
+one, so it loads and `--remove` deletes it only when the hash matches, as the Trust model residual says.
+
+Verification: `python3 -I -m unittest discover -s tests` passes with 412 tests; `git diff --check` is
+clean. Mutation checks on scratch copies (destination check on record keys, matching-hash test on
+removal, fold order, private create mode, private mode copy, unit-tree comparison, co-supplier rule)
+each fail the new tests. An installer built from `30f08e5` refuses a schema 2 project for
+`--update --dry-run`, `--update`, `--add` and `--remove` with exit 2 and "malformed", writing nothing
+(also a test, skipped when that commit is not in the checkout). A scratch end-to-end run produced the
+manifest and tree the specification describes.
+
+Adversarial review (`security-reviewer`, scratch copies, two passes; no Critical or High finding):
+- Pass 1: Medium: `--remove` deleted one path twice and failed mid-write; the writer accepted a record
+  the loader refused (long keys, over 4000 entries); aliases between two modules in one run were not
+  detected. Low: reserved paths covered only modules in the run; unknown or symlinked `harness/`
+  entries were checked only with `--harness`; harness files were not excluded from `--remove`'s block
+  scan and markers were checked before substitution; a rewritten path dropped co-suppliers; reads were
+  unbounded after the stat check. All fixed with regression tests.
+- Pass 2 (of the fixes): Medium: a stale record key could alias a newly written path and wedge the
+  project; Low: a forged record could delete a user-edited file that `files/` had kept. Both fixed with
+  tests, the first also by validating the record in `encode_manifest`. The pass confirmed the earlier
+  fixes against bypass and ran the items pass 1 skipped (dry-run snapshots for each verb, hostile
+  project names, schema 1 with harness keys, the older installer, hostile trees, huge or non-UTF-8
+  existing files); it listed coverage gaps (interrupted runs, `--list` with a bad tree, an `--update`
+  replace of a setuid file under umask 0, a role mapped to `root/CLAUDE.md`), which now have tests.
+- Not reviewed again: the pass 2 fixes were verified by tests and the pass's own reproductions, not by
+  a third review.
+- Accepted residuals: a forged record naming a regular file with a known hash lets `--remove` or
+  `--update` act on it (the specification's stated capability); the walk caps files and entries per
+  directory but not the total directory count, and the top-level `harness/` listing is unbounded
+  (both read only trusted module sources); `makedirs` creates directories with the process umask, as
+  before.
+- Not exercised: a case-sensitive filesystem (alias behaviour was checked in-process), real concurrent
+  swaps between the walk and the read, and how Claude Code loads the installed files.
+
+Not done (deferred above): declarations and the marker, the pilot, external stores and approval, and
+the rest of the roadmap.

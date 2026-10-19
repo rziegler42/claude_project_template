@@ -2,10 +2,10 @@
 """Create or extend a project from base/ plus opt-in modules.
 
 Usage:
-  install.py <target> [--with a,b,name=PATH] [--name N] [--dry-run]
+  install.py <target> [--with a,b,name=PATH] [--name N] [--dry-run] [--harness H]
              [--git-name N --git-email E | --use-global-git-identity]
   install.py --list
-  install.py --add <module|name=PATH>... [--dir DIR]
+  install.py --add <module|name=PATH>... [--dir DIR] [--harness H]
   install.py --register PATH [--name N] [--dry-run]
   install.py --unregister NAME [--dry-run]
   (--registry FILE overrides the registry location for any of the above)
@@ -25,13 +25,18 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
-ROOT = os.path.dirname(os.path.realpath(__file__))
+ROOT =os.path.dirname(os.path.realpath(__file__))
 BASE_DIR = os.path.join(ROOT, "base")
 MODULES_DIR = os.path.join(ROOT, "modules")
 MANIFEST = ".template-manifest"
 PLAN_FILE = "docs/plans/next.md"
 SCHEMA = 1
+HARNESS_SCHEMA = 2
+HARNESS_FILES_MAX = 4000
+HARNESS_KEY_MAX = 256
+HARNESS_RECORD_MAX_BYTES = 512 * 1024
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\Z")
 EXT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\Z")
@@ -562,7 +567,10 @@ def read_regular(path, limit=MAX_FILE_BYTES):
     except OSError as exc:
         raise InstallError("cannot read %s: %s" % (path, exc.strerror or exc))
     with os.fdopen(fd, "rb") as handle:
-        return handle.read()
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise InstallError("file too large (over %d bytes): %s" % (limit, path))
+    return data
 
 
 def reject_git_metadata(rel):
@@ -592,6 +600,447 @@ def collect_tree(source_dir):
                 raise InstallError("path is reserved for the installer: %s" % rel)
             files[rel] = read_regular(full)
     return files
+
+
+# --------------------------------------------------------------------------
+# Harness files (docs/specs/module-harness-files.md)
+
+HARNESS_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}\Z")
+ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}\Z")
+HARNESS_JSON = "harness.json"
+HARNESS_ROOT_DIR = "root"
+HARNESS_MAX_FILES = 128
+HARNESS_MAX_DIR_ENTRIES = 128
+HARNESS_MAX_FILE_BYTES = 256 * 1024
+HARNESS_MAX_TREE_BYTES = 2 * 1024 * 1024
+HARNESS_MAX_DEPTH = 8
+HARNESS_JSON_MAX = 16 * 1024
+HARNESS_ROLES_MAX = 16
+HARNESS_RUN_FILES = 512
+HARNESS_RUN_BYTES = 8 * 1024 * 1024
+HARNESS_PROJECT_NAME_RE = re.compile(r"[A-Za-z0-9._ -]{1,200}\Z")
+# The installer owns this table. `entries` are the top-level names a built-in
+# module may ship under the harness root; `root_files` are the project-root
+# entry points a harness directory carries in `root/`.
+HARNESSES = {
+    "claude": {
+        "root": ".claude",
+        "root_files": ("CLAUDE.md",),
+        "entries": ("skills", "agents", "commands", "remote-runner.toml"),
+    },
+}
+
+
+def fold(text):
+    """Case- and Unicode-fold exactly as the specification says: NFC(casefold(NFC(x)))."""
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", text).casefold())
+
+
+def check_unique(paths):
+    seen = {}
+    for path in paths:
+        key = fold(path)
+        if key in seen:
+            raise InstallError(
+                "harness paths %s and %s are the same after case and Unicode folding"
+                % (shown_text(seen[key]), shown_text(path))
+            )
+        seen[key] = path
+
+
+def shown_text(text, limit=80):
+    """A name for a message, only when it is short, printable text."""
+    if isinstance(text, str) and len(text) <= limit and text.isprintable():
+        return repr(text)
+    return "(long or unprintable name)"
+
+
+def harness_spec(harness):
+    if not (isinstance(harness, str) and HARNESS_NAME_RE.match(harness) and harness in HARNESSES):
+        raise InstallError("unknown harness %s (known: %s)"
+                           % (shown_text(harness, 32), ", ".join(sorted(HARNESSES))))
+    return HARNESSES[harness]
+
+
+def check_harness_dirs(module):
+    """Every `harness/<name>/` of a module must be a real directory of a known harness."""
+    top = os.path.join(module["path"], "harness")
+    if not os.path.lexists(top):
+        return
+    if os.path.islink(top) or not os.path.isdir(top):
+        raise InstallError("module %s: harness is a symlink or not a directory" % module["name"])
+    for entry in sorted(os.listdir(top)):
+        full = os.path.join(top, entry)
+        if os.path.islink(full):
+            raise InstallError("module %s: symlink not allowed in harness: %s"
+                               % (module["name"], shown_text(entry)))
+        if not (os.path.isdir(full) and HARNESS_NAME_RE.match(entry) and entry in HARNESSES):
+            raise InstallError("module %s: harness directory %s is not a known harness (known: %s)"
+                               % (module["name"], shown_text(entry, 32), ", ".join(sorted(HARNESSES))))
+
+
+def harness_source_ok(rel, is_dir, spec, name):
+    """The position rules of "Layout": which source entries a harness directory may hold."""
+    parts = rel.split("/")
+    if not safe_relpath(rel):
+        raise InstallError("module %s: unsafe harness path %s" % (name, shown_text(rel)))
+    if len(parts) > HARNESS_MAX_DEPTH:
+        raise InstallError("module %s: harness path deeper than %d components: %s"
+                           % (name, HARNESS_MAX_DEPTH, shown_text(rel)))
+    top = parts[0]
+    if top == HARNESS_JSON:
+        ok = len(parts) == 1 and not is_dir
+    elif top == HARNESS_ROOT_DIR:
+        ok = (len(parts) == 1 and is_dir) or (
+            len(parts) == 2 and not is_dir and parts[1] in spec["root_files"])
+    elif top in spec["entries"]:
+        ok = (len(parts) > 1 or is_dir == (not top.endswith(".toml")))
+    else:
+        ok = False
+    if not ok:
+        raise InstallError("module %s: harness entry %s is not allowed" % (name, shown_text(rel)))
+
+
+def installed_harness_path(rel, spec):
+    parts = rel.split("/")
+    if parts[0] == HARNESS_ROOT_DIR:
+        return "/".join(parts[1:])
+    return spec["root"] + "/" + rel
+
+
+def frontmatter_name(text):
+    lines = text.split("\n")
+    if not lines or lines[0] != "---":
+        return None
+    for line in lines[1:]:
+        if line == "---":
+            return None
+        if line.startswith("name:"):
+            return line[5:].strip() or None
+    return None
+
+
+def harness_unit(installed, spec):
+    """(unit path, primary file path or None, default name) for an installed harness path, or None."""
+    prefix = spec["root"] + "/"
+    if not installed.startswith(prefix):
+        return None
+    parts = installed[len(prefix):].split("/")
+    kind = parts[0]
+    if kind == "skills" and len(parts) >= 2:
+        if len(parts) == 2:  # a loose file in skills/
+            return prefix + "/".join(parts), prefix + "/".join(parts), parts[1].rsplit(".", 1)[0]
+        unit = prefix + "skills/" + parts[1]
+        return unit, unit + "/SKILL.md", parts[1]
+    if kind in ("agents", "commands") and len(parts) >= 2:
+        return installed, installed, parts[-1].rsplit(".", 1)[0]
+    return None
+
+
+def read_harness_tree(module, harness, reserved=frozenset(), budget=None):
+    """Read and check a built-in module's `harness/<harness>/` tree.
+
+    Returns ({installed path: bytes}, {unit path: name}). The walk counts and
+    stats first and reads no file until every count, depth, shape and size
+    limit has passed. `reserved` holds folded installed paths that `base/` and
+    module `files/` ship; `budget` counts the files and bytes of a whole run.
+    """
+    spec = harness_spec(harness)
+    check_harness_dirs(module)
+    name = module["name"]
+    source = os.path.join(module["path"], "harness", harness)
+    if not os.path.lexists(source):
+        return {}, {}
+    found = []  # (source rel, full path)
+    total = 0
+    stack = [("", source)]
+    while stack:
+        rel_dir, full_dir = stack.pop()
+        with os.scandir(full_dir) as scan:
+            names = []
+            for entry in scan:
+                names.append(entry.name)
+                if len(names) > HARNESS_MAX_DIR_ENTRIES:
+                    raise InstallError("module %s: more than %d entries in a harness directory"
+                                       % (name, HARNESS_MAX_DIR_ENTRIES))
+        for entry_name in sorted(names):
+            rel = rel_dir + "/" + entry_name if rel_dir else entry_name
+            full = os.path.join(full_dir, entry_name)
+            info = os.lstat(full)
+            if stat.S_ISLNK(info.st_mode):
+                raise InstallError("module %s: symlink not allowed in harness: %s"
+                                   % (name, shown_text(rel)))
+            if stat.S_ISDIR(info.st_mode):
+                harness_source_ok(rel, True, spec, name)
+                stack.append((rel, full))
+            elif stat.S_ISREG(info.st_mode):
+                harness_source_ok(rel, False, spec, name)
+                if len(found) >= HARNESS_MAX_FILES:
+                    raise InstallError("module %s: more than %d harness files"
+                                       % (name, HARNESS_MAX_FILES))
+                if info.st_size > HARNESS_MAX_FILE_BYTES:
+                    raise InstallError("module %s: harness file over %d KiB: %s"
+                                       % (name, HARNESS_MAX_FILE_BYTES // 1024, shown_text(rel)))
+                total += info.st_size
+                if budget is not None:
+                    budget.add(info.st_size)
+                if total > HARNESS_MAX_TREE_BYTES:
+                    raise InstallError("module %s: harness tree over %d MiB"
+                                       % (name, HARNESS_MAX_TREE_BYTES // (1024 * 1024)))
+                found.append((rel, full))
+            else:
+                raise InstallError("module %s: not a regular file in harness: %s"
+                                   % (name, shown_text(rel)))
+    contents = {}
+    for rel, full in found:
+        data = read_regular(full, HARNESS_MAX_FILE_BYTES)
+        if not is_text(data):
+            raise InstallError("module %s: harness file is not UTF-8 text without NUL: %s"
+                               % (name, shown_text(rel)))
+        text = data.decode("utf-8")
+        if any(marker in text for marker in FRAGMENT_FORBIDDEN):
+            raise InstallError("module %s: harness file holds a slot or block marker: %s"
+                               % (name, shown_text(rel)))
+        contents[rel] = data
+    if HARNESS_JSON in contents:
+        check_harness_json(contents[HARNESS_JSON], contents, name)
+    installed = {}
+    for rel, data in contents.items():
+        if rel != HARNESS_JSON:
+            installed[installed_harness_path(rel, spec)] = data
+    for path in installed:
+        if len(path) > HARNESS_KEY_MAX:
+            raise InstallError("module %s: installed harness path over %d characters: %s"
+                               % (name, HARNESS_KEY_MAX, shown_text(path)))
+    check_unique(installed)
+    for path in installed:
+        if fold(path) in reserved:
+            raise InstallError("module %s: harness file %s is also shipped by base/ or a module's "
+                               "files/" % (name, shown_text(path)))
+    units = {}
+    names = {}
+    for path in sorted(installed):
+        unit = harness_unit(path, spec)
+        if unit is None or unit[0] in units:
+            continue
+        unit_path, primary, default = unit
+        value = default
+        if primary in installed:
+            value = frontmatter_name(installed[primary].decode("utf-8")) or default
+        if fold(value) in names:
+            raise InstallError("module %s: two harness units are named %s"
+                               % (name, shown_text(value)))
+        names[fold(value)] = unit_path
+        units[unit_path] = value
+    return installed, units
+
+
+class RunBudget:
+    """Files and bytes of harness trees read in one run, across modules."""
+
+    def __init__(self):
+        self.files = 0
+        self.size = 0
+
+    def add(self, size):
+        self.files += 1
+        self.size += size
+        if self.files > HARNESS_RUN_FILES:
+            raise InstallError("more than %d harness files in one run" % HARNESS_RUN_FILES)
+        if self.size > HARNESS_RUN_BYTES:
+            raise InstallError("more than %d MiB of harness files in one run"
+                               % (HARNESS_RUN_BYTES // (1024 * 1024)))
+
+
+def reserved_paths(modules, names):
+    """Folded installed paths that `base/` and the `files/` of built-in `names` ship."""
+    reserved = {fold(rel) for rel in collect_tree(BASE_DIR)}
+    for name in names:
+        if name in modules and not modules[name].get("external"):
+            reserved |= {fold(rel) for rel in
+                         collect_tree(os.path.join(modules[name]["path"], "files"))}
+    return reserved
+
+
+def harness_sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def substitute_harness(files, project_name):
+    """The ordinary placeholders, but only for a name conservative enough for an approved file."""
+    uses = any(NAME_PLACEHOLDER in data or ID_PLACEHOLDER in data for data in files.values())
+    if uses and not HARNESS_PROJECT_NAME_RE.match(project_name):
+        raise InstallError("project name %s cannot be written into harness files; "
+                           "use letters, digits, '.', '_', '-' and spaces (pass --name)"
+                           % shown_text(project_name))
+    substitute(files, project_name)
+
+
+def check_module_harness_dirs(names, modules):
+    """A module's `harness/` entries must be sound whenever the module is used, with or without a harness."""
+    for name in names:
+        if name in modules and not modules[name].get("external"):
+            check_harness_dirs(modules[name])
+
+
+def prepare_harness(names, modules, harness, project_name, installed=()):
+    """Read, check and substitute the harness tree of each built-in module in `names`.
+
+    `installed` are the project's other modules; their `files/` are reserved too.
+    """
+    builtin = [n for n in names if not modules[n].get("external")]
+    reserved = reserved_paths(modules, set(builtin) | set(installed))
+    budget = RunBudget()
+    trees = {}
+    for name in builtin:
+        files, units = read_harness_tree(modules[name], harness, reserved, budget)
+        substitute_harness(files, project_name)
+        for path, data in files.items():
+            if any(marker.encode() in data for marker in FRAGMENT_FORBIDDEN):
+                raise InstallError("module %s: harness file holds a slot or block marker after "
+                                   "substitution: %s" % (name, shown_text(path)))
+        trees[name] = (files, units)
+    return trees
+
+
+class HarnessPlan:
+    def __init__(self, record):
+        self.writes = {}
+        self.record = record
+        self.conflicts = []
+        self.adopted = []
+
+
+def plan_harness(trees, harness, existing, record, project=None):
+    """Decide what the run writes and records (specification, "Collisions").
+
+    `trees` maps each module in the run to (files, units); `existing` is the
+    project scan; `record` the manifest's `harness_files`. Nothing is written
+    here. Two suppliers in this run that disagree fail the run.
+    """
+    spec = HARNESSES[harness]
+    plan = HarnessPlan({path: dict(entry) for path, entry in record.items()})
+    supply = {}
+    unit_trees = {}
+    run_names = {}
+    for module in sorted(trees):
+        files, units = trees[module]
+        for path, data in files.items():
+            supply.setdefault(path, {})[module] = data
+            unit = harness_unit(path, spec)
+            if unit:
+                unit_trees.setdefault(unit[0], {}).setdefault(module, {})[path] = data
+        for unit, value in units.items():
+            run_names.setdefault(fold(value), set()).add(unit)
+    check_unique(sorted(supply))
+    for path, by in sorted(supply.items()):
+        if len(set(by.values())) > 1:
+            raise InstallError("%s is supplied with different content by %s"
+                               % (path, ", ".join(sorted(by))))
+    for unit, by in sorted(unit_trees.items()):
+        shapes = list(by.values())
+        if any(shape != shapes[0] for shape in shapes):
+            raise InstallError("%s is supplied as different trees by %s"
+                               % (unit, ", ".join(sorted(by))))
+    for key, units in sorted(run_names.items()):
+        if len(units) > 1:
+            raise InstallError("two harness units are named %s: %s"
+                               % (shown_text(key), ", ".join(sorted(units))))
+    taken = {}
+    for path, data in existing.items():
+        unit = harness_unit(path, spec)
+        if unit and path == unit[1]:
+            value = frontmatter_name(data.decode("utf-8", "replace")) or unit[2]
+            taken[fold(value)] = unit[0]
+    folded = {}
+    for path in existing:
+        folded.setdefault(fold(path), path)
+    recorded_fold = {fold(key): key for key in plan.record}
+    action = {}
+    for path, by in sorted(supply.items()):
+        data = next(iter(by.values()))
+        suppliers = sorted(by)
+        entry = plan.record.get(path)
+        real = folded.get(fold(path))
+        stale = recorded_fold.get(fold(path))
+        if real is not None and real != path:
+            action[path] = ("conflict", "same as %s after case and Unicode folding" % shown_text(real))
+        elif stale is not None and stale != path:
+            action[path] = ("conflict", "same as the recorded path %s after case and Unicode "
+                                        "folding" % shown_text(stale))
+        elif path in existing:
+            if existing[path] == data:
+                action[path] = ("adopt", None)
+            elif (entry and harness_sha(existing[path]) == entry["sha256"]
+                  and set(entry["modules"]) <= set(by)):
+                action[path] = ("replace", None)
+            else:
+                action[path] = ("conflict", "differs from the module's file; not overwriting")
+        elif project is not None and os.path.lexists(os.path.join(project, *path.split("/"))):
+            action[path] = ("conflict", "exists and is not a regular file")
+        else:
+            action[path] = ("write", None)
+    bad = set()
+    for module in trees:
+        for unit, value in trees[module][1].items():
+            other = taken.get(fold(value))
+            if other is not None and other != unit:
+                bad.add(unit)
+                plan.conflicts.append((unit, "name %s is already used by %s" % (shown_text(value), other)))
+    for path, (kind, why) in action.items():
+        if kind == "conflict":
+            unit = harness_unit(path, spec)
+            bad.add(unit[0] if unit else path)
+            plan.conflicts.append((path, why))
+    for path, (kind, _) in sorted(action.items()):
+        unit = harness_unit(path, spec)
+        if kind == "conflict" or (unit and unit[0] in bad):
+            continue
+        data = next(iter(supply[path].values()))
+        suppliers = sorted(supply[path])
+        entry = plan.record.get(path)
+        if kind == "adopt":
+            plan.adopted.append(path)
+        else:
+            plan.writes[path] = data
+        plan.record[path] = {
+            "sha256": harness_sha(data),
+            "modules": sorted(set(entry["modules"] if entry else ()) | set(suppliers)),
+        }
+    return plan
+
+
+def report_harness(out, plan, harness, trees):
+    for module in sorted(trees):
+        if not trees[module][0]:
+            out("  %s: no %s files" % (module, harness))
+    for path, why in plan.conflicts:
+        out("  conflict %s (%s)" % (path, why))
+    if plan.conflicts:
+        out("  harness: %d conflict(s); those files were not written or recorded" % len(plan.conflicts))
+
+
+def check_harness_json(data, contents, name):
+    def bad(why):
+        return InstallError("module %s: %s %s" % (name, HARNESS_JSON, why))
+
+    if len(data) > HARNESS_JSON_MAX:
+        raise bad("is over %d KiB" % (HARNESS_JSON_MAX // 1024))
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (ValueError, RecursionError):
+        raise bad("is not valid JSON")
+    if not isinstance(value, dict) or not set(value) <= {"roles"}:
+        raise bad("must be an object with only a roles key")
+    roles = value.get("roles", {})
+    if not isinstance(roles, dict) or len(roles) > HARNESS_ROLES_MAX:
+        raise bad("roles must be an object of at most %d entries" % HARNESS_ROLES_MAX)
+    for role, target in roles.items():
+        if not ROLE_RE.match(role):
+            raise bad("has an invalid role id")
+        if not (isinstance(target, str) and safe_relpath(target) and target in contents
+                and target != HARNESS_JSON):
+            raise bad("maps a role to a file that is not in the harness directory")
 
 
 def scan_project(project, skipped=None):
@@ -1193,7 +1642,7 @@ def delete_files(root, rels):
                 os.close(fd)
 
 
-def write_tree(target, tree, delete=()):
+def write_tree(target, tree, delete=(), private=()):
     """Write every file via a temporary sibling and rename, manifest last.
 
     A rename replaces the directory entry, so a hardlinked file's other names
@@ -1213,11 +1662,11 @@ def write_tree(target, tree, delete=()):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             temp = "%s.install-%d.tmp" % (dest, os.getpid())
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(temp, flags, 0o666)
+            fd = os.open(temp, flags, 0o644 if rel in private else 0o666)
             staged.append((temp, dest))
             with os.fdopen(fd, "wb") as handle:
                 handle.write(tree[rel])
-            if os.path.exists(dest):
+            if rel not in private and os.path.exists(dest):
                 os.chmod(temp, stat.S_IMODE(os.lstat(dest).st_mode))
         manifest_dest = os.path.join(target, MANIFEST)
         pending = list(delete)
@@ -1306,6 +1755,57 @@ def validate_optional_keys(manifest, builtin):
                            "module_info entry" % MANIFEST)
 
 
+def harness_destination_ok(key, spec):
+    """Is `key` a path the recorded harness can install to (specification, "Manifest")?"""
+    if key in spec["root_files"]:
+        return True
+    prefix = spec["root"] + "/"
+    if not key.startswith(prefix):
+        return False
+    parts = key[len(prefix):].split("/")
+    if parts[0] not in spec["entries"]:
+        return False
+    return len(parts) == 1 if parts[0].endswith(".toml") else len(parts) >= 2
+
+
+def validate_harness_record(manifest):
+    """`harness` and `harness_files` go with schema 2 and with nothing else."""
+    schema = manifest.get("schema")
+    has = [key in manifest for key in ("harness", "harness_files")]
+    if schema == SCHEMA and any(has):
+        raise InstallError("%s has a harness record but schema %d" % (MANIFEST, SCHEMA))
+    if schema == HARNESS_SCHEMA and not all(has):
+        raise InstallError("%s has schema %d but no harness record" % (MANIFEST, HARNESS_SCHEMA))
+    if schema == SCHEMA:
+        return
+    harness, record = manifest["harness"], manifest["harness_files"]
+    if not (isinstance(harness, str) and harness in HARNESSES):
+        raise InstallError("%s has an unknown harness" % MANIFEST)
+    spec = HARNESSES[harness]
+    ok = isinstance(record, dict) and len(record) <= HARNESS_FILES_MAX
+    known = set(manifest.get("modules", [])) | set(manifest.get("external_modules", {}))
+    seen = set()
+    for key, entry in (record.items() if ok else ()):
+        modules = entry.get("modules") if isinstance(entry, dict) else None
+        sha = entry.get("sha256") if isinstance(entry, dict) else None
+        ok = (
+            ok
+            and isinstance(key, str) and len(key) <= HARNESS_KEY_MAX and safe_relpath(key)
+            and key.casefold() != MANIFEST.casefold()
+            and harness_destination_ok(key, spec) and fold(key) not in seen
+            and isinstance(entry, dict) and set(entry) == {"sha256", "modules"}
+            and isinstance(sha, str) and DIGEST_RE.match(sha)
+            and isinstance(modules, list) and modules and modules == sorted(set(
+                m for m in modules if isinstance(m, str)))
+            and all(EXT_NAME_RE.match(m) and m in known for m in modules)
+        )
+        seen.add(fold(key) if isinstance(key, str) else key)
+    if ok and len(json.dumps(record)) > HARNESS_RECORD_MAX_BYTES:
+        ok = False
+    if not ok:
+        raise InstallError("%s has a malformed harness or harness_files entry" % MANIFEST)
+
+
 def load_manifest(project, builtin=()):
     if os.path.islink(project):
         raise InstallError("project directory is a symlink: %s" % project)
@@ -1323,7 +1823,8 @@ def load_manifest(project, builtin=()):
     schema = manifest.get("schema") if isinstance(manifest, dict) else None
     if (
         not isinstance(manifest, dict)
-        or isinstance(schema, bool) or schema != SCHEMA
+        or isinstance(schema, bool) or not isinstance(schema, int)
+        or schema not in (SCHEMA, HARNESS_SCHEMA)
         or not isinstance(modules, list)
         or not all(isinstance(m, str) and NAME_RE.match(m) for m in modules)
     ):
@@ -1334,6 +1835,7 @@ def load_manifest(project, builtin=()):
     if "external_modules" in manifest:
         validate_external_modules(manifest["external_modules"], builtin)
     validate_optional_keys(manifest, builtin)
+    validate_harness_record(manifest)
     return manifest
 
 
@@ -1358,10 +1860,33 @@ def module_info_for(modules, names):
     return info
 
 
+def check_record_limits(record):
+    """The load-time limits on `harness_files`, enforced when writing too."""
+    if (len(record) > HARNESS_FILES_MAX
+            or any(len(key) > HARNESS_KEY_MAX for key in record)
+            or len(json.dumps(record)) > HARNESS_RECORD_MAX_BYTES):
+        raise InstallError("the harness record would exceed its limits (%d entries, %d-character "
+                           "paths, %d KiB); nothing was written"
+                           % (HARNESS_FILES_MAX, HARNESS_KEY_MAX, HARNESS_RECORD_MAX_BYTES // 1024))
+
+
+def encode_manifest(manifest):
+    """Serialize a manifest, refusing one the next run could not read back."""
+    if isinstance(manifest.get("harness_files"), dict):
+        check_record_limits(manifest["harness_files"])
+    if "harness" in manifest or "harness_files" in manifest:
+        validate_harness_record(manifest)
+    data = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(data) > MAX_MANIFEST_BYTES:
+        raise InstallError("%s would exceed %d bytes; nothing was written"
+                           % (MANIFEST, MAX_MANIFEST_BYTES))
+    return data
+
+
 def manifest_bytes(module_names, commit, dirty, externals=None, project_name=None,
-                   module_info=None):
+                   module_info=None, harness=None, harness_files=None):
     payload = {
-        "schema": SCHEMA,
+        "schema": HARNESS_SCHEMA if harness else SCHEMA,
         "template_commit": commit,
         "template_dirty": dirty,
         "modules": sorted(module_names),
@@ -1372,7 +1897,23 @@ def manifest_bytes(module_names, commit, dirty, externals=None, project_name=Non
         payload["project_name"] = project_name
     if module_info:
         payload["module_info"] = module_info
-    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if harness:
+        payload["harness"] = harness
+        payload["harness_files"] = harness_files or {}
+    return encode_manifest(payload)
+
+
+def choose_harness(option, recorded, introduce):
+    """The project's harness for this run, from `--harness` and the manifest (specification, "Selection")."""
+    if option is not None:
+        harness_spec(option)
+        if recorded is not None and option != recorded:
+            raise InstallError("this project's harness is %s; it cannot be changed (create a "
+                               "new project)" % recorded)
+        if recorded is None and not introduce:
+            raise InstallError("--update never introduces a harness; use --add --harness %s "
+                               "once" % option)
+    return recorded or option
 
 
 def cmd_new(args, out):
@@ -1402,6 +1943,12 @@ def cmd_new(args, out):
     names = resolve(selected, modules)
     tree = assemble(names, modules)
     substitute(tree, name)
+    harness_plan, trees = None, {}
+    check_module_harness_dirs(names, modules)
+    if args.harness is not None:
+        trees = prepare_harness(names, modules, args.harness, name)
+        harness_plan = plan_harness(trees, args.harness, {}, {})
+        tree.update(harness_plan.writes)
     identity = None
     if not args.dry_run:
         identity = resolve_identity(args, interactive)
@@ -1411,6 +1958,8 @@ def cmd_new(args, out):
         {n: external_record(modules[n]) for n in names if n in externals},
         project_name=name,
         module_info=module_info_for(modules, names),
+        harness=args.harness,
+        harness_files=harness_plan.record if harness_plan else None,
     )
 
     out("Project: %s" % name)
@@ -1419,6 +1968,8 @@ def cmd_new(args, out):
     pulled = sorted(set(names) - set(selected))
     if pulled:
         out("Required modules added: %s" % ", ".join(pulled))
+    if harness_plan:
+        report_harness(out, harness_plan, args.harness, trees)
     if args.dry_run:
         for rel in sorted(tree):
             out("  would write %s" % rel)
@@ -1427,7 +1978,7 @@ def cmd_new(args, out):
         return 0
 
     os.makedirs(target, exist_ok=True)
-    write_tree(target, tree)
+    write_tree(target, tree, private=set(harness_plan.writes) if harness_plan else ())
     git(["init", "-q", "--template="], cwd=target)
     git(["symbolic-ref", "HEAD", "refs/heads/main"], cwd=target)
     exclude = os.path.join(target, ".git", "info", "exclude")
@@ -1555,6 +2106,8 @@ def cmd_add(args, out):
     manifest = load_manifest(project, builtin)
     installed = list(manifest["modules"])
     recorded = dict(manifest.get("external_modules", {}))
+    harness = choose_harness(args.harness, manifest.get("harness"), introduce=True)
+    activating = harness is not None and "harness" not in manifest
     entries = parse_entries(args.add)
     # A recorded external module is never re-read: its store may have moved.
     fresh = [(n, v) for n, v in entries if n not in recorded]
@@ -1565,7 +2118,7 @@ def cmd_add(args, out):
     modules = dict(modules, **externals)
     wanted = resolve(list(installed) + [n for n, _ in fresh], modules)
     new = [name for name in wanted if name not in installed]
-    if not new:
+    if not new and not activating:
         out("Nothing to add: %s already installed." % ", ".join(n for n, _ in entries))
         return 0
 
@@ -1594,6 +2147,13 @@ def cmd_add(args, out):
         out("Skipped (not read, patched, or written through):")
         for rel, reason in sorted(skipped):
             out("  %s (%s)" % (rel, reason))
+    harness_plan, trees = None, {}
+    check_module_harness_dirs(new, modules)
+    if harness:
+        wanted_here = [n for n in wanted if n in modules and (activating or n in new)]
+        trees = prepare_harness(wanted_here, modules, harness, project_name, installed=wanted)
+        harness_plan = plan_harness(trees, harness, existing,
+                                    manifest.get("harness_files", {}), project)
     existing.update(writes)
     owned = owned_paths(modules, [n for n in wanted if n not in externals])
     fragments = {name: modules[name]["slots"] for name in wanted}
@@ -1616,6 +2176,11 @@ def cmd_add(args, out):
             + ", ".join("%s:%s" % pair for pair in sorted(missing))
         )
     writes.update(patched)
+    if harness_plan:
+        writes.update(harness_plan.writes)
+        manifest["schema"] = HARNESS_SCHEMA
+        manifest["harness"] = harness
+        manifest["harness_files"] = harness_plan.record
     commit, dirty = template_state()
     added = dict(manifest.get("module_commits", {}))
     for name in new:
@@ -1632,16 +2197,22 @@ def cmd_add(args, out):
         recorded[name] = external_record(externals[name])
     if recorded:
         manifest["external_modules"] = recorded
-    writes[MANIFEST] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    writes[MANIFEST] = encode_manifest(manifest)
 
-    out("Adding modules: %s" % ", ".join(new))
+    out("Adding modules: %s" % (", ".join(new) or "none"))
+    if harness_plan:
+        report_harness(out, harness_plan, harness, trees)
+        if activating and recorded:
+            out("  note: the harness files of external modules already installed (%s) were "
+                "not read, so none were installed" % ", ".join(sorted(recorded)))
+    private = set(harness_plan.writes) if harness_plan else ()
     if args.dry_run:
         for rel in sorted(writes):
             out("  would write %s" % rel)
         emit_hints(out, new, modules, True)
         out("Dry run: nothing written.")
         return 0
-    write_tree(project, writes)
+    write_tree(project, writes, private=private)
     for rel in sorted(writes):
         out("  wrote %s" % rel)
     emit_hints(out, new, modules, False)
@@ -1844,6 +2415,7 @@ def cmd_update(args, out):
     manifest = load_manifest(project, builtin)
     installed = list(manifest["modules"])
     recorded = dict(manifest.get("external_modules", {}))
+    harness = choose_harness(args.harness, manifest.get("harness"), introduce=False)
     entries = parse_entries(args.update)
     for name, value in entries:
         if name in recorded:
@@ -1911,6 +2483,13 @@ def cmd_update(args, out):
                 kept.append(["kept", rel, "differs from the template; not overwriting",
                              existing[rel], data])
 
+    harness_plan, trees = None, {}
+    check_module_harness_dirs(targets, modules)
+    if harness:
+        trees = prepare_harness(targets, modules, harness, project_name, installed=present)
+        harness_plan = plan_harness(trees, harness, existing, manifest["harness_files"], project)
+        writes.update(harness_plan.writes)
+
     bases = BaseFinder(manifest, project_name, set(recorded))
     outcome = {}
     for entry in kept:
@@ -1970,6 +2549,9 @@ def cmd_update(args, out):
         out("  %s %s (%s)" % (verb, rel, why))
     for note in notes:
         out("  note: %s" % note)
+    if harness_plan:
+        report_harness(out, harness_plan, harness, trees)
+    record_changed = bool(harness_plan) and harness_plan.record != manifest["harness_files"]
     info = dict(manifest.get("module_info", {}))
     if not entries:
         # Declared by the template, so a full run rebuilds it; a module the
@@ -1981,9 +2563,11 @@ def cmd_update(args, out):
     # Every external that verified gets a fresh entry, whether or not its digest moved.
     info.update(module_info_for(externals, sorted(externals)))
     info_changed = info != manifest.get("module_info", {})
-    if not writes and not changed and not info_changed:
+    if not writes and not changed and not info_changed and not record_changed:
         out("Nothing to update.")
         return 0
+    if record_changed:
+        manifest["harness_files"] = harness_plan.record
     if info_changed:
         if info:
             manifest["module_info"] = info
@@ -2023,13 +2607,13 @@ def cmd_update(args, out):
         recorded[name] = external_record(meta)
     if recorded:
         manifest["external_modules"] = recorded
-    writes[MANIFEST] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    writes[MANIFEST] = encode_manifest(manifest)
     if args.dry_run:
         for rel in sorted(writes):
             out("  would write %s" % rel)
         out("Dry run: nothing written.")
         return 0
-    write_tree(project, writes)
+    write_tree(project, writes, private=set(harness_plan.writes) if harness_plan else ())
     for rel in sorted(writes):
         out("  wrote %s" % rel)
     return 0
@@ -2068,9 +2652,10 @@ def cmd_remove(args, out):
 
     notes = []
     writes = {}
+    harness_paths = set(manifest.get("harness_files", {}))
     for rel in sorted(existing):
         data = existing[rel]
-        if not is_text(data) or b"BEGIN module:" not in data:
+        if rel in harness_paths or not is_text(data) or b"BEGIN module:" not in data:
             continue
         text = data.decode("utf-8")
         try:
@@ -2112,8 +2697,31 @@ def cmd_remove(args, out):
             else:
                 kept.append(rel)
 
+    record = dict(manifest["harness_files"]) if "harness" in manifest else None
+    for path in sorted(record or ()):
+        entry = record[path]
+        left = [m for m in entry["modules"] if m not in names]
+        if len(left) == len(entry["modules"]):
+            continue
+        if left:
+            record[path] = {"sha256": entry["sha256"], "modules": left}
+            continue
+        del record[path]
+        data = existing.get(path)
+        if data is None:
+            notes.append("%s is not a regular file in the project; its record was dropped" % path)
+        elif path.casefold() in keep:
+            notes.append("%s is also shipped by the template or a remaining module; left" % path)
+        elif path in deletes or path in kept:
+            pass  # a `files/` entry of the same module already decided this path
+        elif harness_sha(data) == entry["sha256"] and safe:
+            writes.pop(path, None)
+            deletes.append(path)
+        else:
+            kept.append(path)
+
     for rel in sorted(existing):
-        if rel in deletes:
+        if rel in deletes or rel in harness_paths:
             continue
         data = writes.get(rel, existing[rel])
         for name in names:
@@ -2143,7 +2751,9 @@ def cmd_remove(args, out):
         manifest["external_modules"] = recorded
     else:
         manifest.pop("external_modules", None)
-    writes[MANIFEST] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if record is not None:
+        manifest["harness_files"] = record
+    writes[MANIFEST] = encode_manifest(manifest)
     if args.dry_run:
         for rel in sorted(writes):
             out("  would write %s" % rel)
@@ -2184,6 +2794,11 @@ def build_parser():
         "--use-global-git-identity",
         action="store_true",
         help="inherit the global git identity instead of setting a local one",
+    )
+    parser.add_argument(
+        "--harness", metavar="NAME",
+        help="harness whose module files (harness/<NAME>/) are installed, recorded in the "
+             "manifest; known: %s" % ", ".join(sorted(HARNESSES)),
     )
     parser.add_argument("--list", action="store_true", help="list available modules")
     parser.add_argument(
@@ -2226,6 +2841,8 @@ def main(argv=None, out=print):
             raise InstallError("--merge cannot be limited to named modules: "
                                "it brings every installed module up to date")
         registry_modes = (args.register is not None) + (args.unregister is not None)
+        if args.harness is not None and (args.list or registry_modes or removing):
+            raise InstallError("--harness applies to a new project, --add and --update only")
         if removing and (
             registry_modes or args.list or args.add or updating or args.target or args.with_
         ):

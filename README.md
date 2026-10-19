@@ -15,6 +15,7 @@ only), and git.
     --git-name "Your Name" --git-email "id+user@users.noreply.github.com"
 ./install.py ../my-project --with cad --dry-run       # preview only
 ./install.py ../my-project --with cad-freecad graphify   # space-separated works too
+./install.py ../my-project --with cad --harness claude   # also install modules' Claude files
 ```
 
 - `--with`, `--add`, `--update` and `--remove` take several modules separated by
@@ -39,6 +40,9 @@ only), and git.
   when a selected file uses the id.
 - The installer prints any `REPLACE_WITH_*` placeholders still to fill in and
   records the chosen modules in the tracked `.template-manifest`.
+- `--harness NAME` also installs the harness files the chosen modules ship for that
+  harness (see [Harness files](#harness-files)). Without it, a project gets only the
+  neutral content.
 
 ## Add a module later
 
@@ -228,6 +232,9 @@ the trust model, mitigations, and accepted residuals. In practice:
     installer prints under "Next steps" after a new install or `--add`, and
     optional `type`, `paths` and `data` (see [Module info](#module-info)).
   - `files/` — copied verbatim to the same relative path.
+  - `harness/<harness>/` — files for one harness (`claude`), installed into that
+    harness's directory only when a project records the harness (see
+    [Harness files](#harness-files)).
   - `slots/<slot>.md` — fragments inserted at `@module-slot: <slot>` marker
     lines in `base/` files or other modules' files, wrapped in
     `BEGIN/END module:<name> slot:<slot>` markers.
@@ -309,7 +316,9 @@ location chosen at install time is an external module's `store`.
    harness-specific or name a Claude-owned helper or skill; a module bound to
    one tool, such as `codex`, is marked this way and requires the neutral
    module that holds the policy.
-5. Run the tests; add a case if the module introduces new behavior.
+5. Skills, agents and commands that serve the module go under
+   `harness/<harness>/`, not in `files/` (see [Harness files](#harness-files)).
+6. Run the tests; add a case if the module introduces new behavior.
 
 Slots available in `base/` (a fragment's file name is the slot name):
 
@@ -329,11 +338,59 @@ was added. `--add` for a module whose fragment needs a newer marker fails
 with "fragments with no matching slot marker" on an older project; the fix
 is to add the marker line by hand or create the project again.
 
+## Harness files
+
+A built-in module may ship the files that serve it for one coding harness, such as
+Claude Code skills and agents, instead of leaving them in a developer's global
+configuration. They live in `modules/<name>/harness/<harness>/`; the installer owns the
+table of harnesses, which has one entry, `claude` (root `.claude/`).
+
+```text
+modules/<name>/harness/claude/
+  skills/<skill>/SKILL.md      -> .claude/skills/<skill>/SKILL.md
+  agents/<agent>.md            -> .claude/agents/<agent>.md
+  commands/<command>.md        -> .claude/commands/<command>.md
+  remote-runner.toml           -> .claude/remote-runner.toml
+  root/CLAUDE.md               -> CLAUDE.md   (root-level entry points only)
+  harness.json                 (optional; checked, never installed)
+```
+
+- A project has at most one harness. `--harness NAME` on a new project records it;
+  `--add --harness NAME` records it once on a project that has none and installs the
+  files of every installed built-in module; a different name than the recorded one is
+  refused, `--update --harness` accepts only the recorded name, and `--update` never
+  introduces a harness. Switching harness means creating a new project.
+- A file that already exists with identical bytes is adopted; one that differs is never
+  overwritten and is reported as a `conflict`, and a skill directory with any
+  conflicting file is skipped whole. `--update` replaces a file you have not edited
+  (judged by the SHA-256 the manifest records) and keeps one you edited; it never
+  deletes. `--remove` deletes the unedited files a module alone supplied and keeps the
+  rest. Installed files are created `0644 & ~umask`, never executable.
+- A harness tree is checked before anything is written: only `skills/`, `agents/`,
+  `commands/` and `remote-runner.toml` (plus `root/CLAUDE.md` and `harness.json`) are
+  allowed, so settings, hooks and MCP files cannot be shipped; no symlinks, special
+  files, `.git`, case or Unicode aliases, slot or block markers, or binary files; at most
+  128 files, 256 KiB per file and 2 MiB per module, and 512 files and 8 MiB per run.
+  A skill, agent or command is identified by its frontmatter `name`, and two units with
+  the same name conflict. A module with nothing for the project's harness installs its
+  neutral part and says so.
+- The manifest of a project that records a harness has `schema` 2, `harness`, and
+  `harness_files` (each installed path with its SHA-256 and supplying modules); other
+  projects keep `schema` 1 and are unchanged. An installer from before this feature
+  refuses a `schema` 2 manifest (it fails closed with a "malformed" error and writes
+  nothing), so update the template checkout before running it on such a project.
+- No module ships harness files yet, and helper and worker declarations, external
+  stores and their approval are not implemented. The decision is
+  [ADR 0004](docs/decisions/0004-harness-files-in-modules.md) and the rules are in
+  [the specification](docs/specs/module-harness-files.md).
+
 ## Boundaries
 
 Committed content names capabilities and policy, never a specific helper or
 skill. Harness-specific skills, agents, and helpers belong to each developer's
-own harness configuration. Policy that appears in both a project's
+own harness configuration, or in a module's `harness/<harness>/` directory (see
+[Harness files](#harness-files)); everything outside those directories stays
+tool-neutral. Policy that appears in both a project's
 `AGENTS.md` and a developer's global instructions (no commit or push without
 approval, no AI attribution, plan location) is intentionally duplicated so
 other harnesses follow it; keep the two consistent when either changes.
