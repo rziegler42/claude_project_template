@@ -95,7 +95,8 @@ module, `"harness": true` is retired, and the `claude` module's files become the
 directory.
 **Dependencies:** 4. Migration for existing projects is decided in the plan.
 **Boundary:** no change to `ask-codex`.
-**Promotion trigger:** candidate 4 complete.
+**Promotion trigger:** candidate 4 complete. Met. Promoted 2026-10-19: the plan is drafted in
+`docs/plans/next.md` and waits for the owner's approval.
 
 ### 7. `formal` (template side done 2026-10-19, plan 0021)
 
