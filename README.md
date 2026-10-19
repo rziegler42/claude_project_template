@@ -254,7 +254,7 @@ the trust model, mitigations, and accepted residuals. In practice:
 | `graphify` | Graphify discovery/impact policy, `.graphifyignore`, plan evidence section |
 | `plan-review` | Tool-neutral policy for an independent, bounded, read-only review of the plan, and a Second opinion receipt in the plan and its archive |
 | `codex` | Codex plan review through the `ask-codex` helper and `second-opinion` skill: request, limits, owner-only commands, state, and mapping to the plan's receipt; requires `plan-review` (harness) |
-| `formal` | Tool-neutral formal verification guidance |
+| `formal` | Tool-neutral formal verification guidance; with `--harness claude`, also the `verilog-sby-formal` skill |
 | `cad` | Tool-neutral CAD workflow (`docs/cad.md`) |
 | `cad-freecad` | FreeCAD conventions; requires `cad`; with `--harness claude`, also the `freecad-scripts` skill |
 
@@ -381,9 +381,12 @@ modules/<name>/harness/claude/
   projects keep `schema` 1 and are unchanged. An installer from before this feature
   refuses a `schema` 2 manifest (it fails closed with a "malformed" error and writes
   nothing), so update the template checkout before running it on such a project.
-- `cad-freecad` is the first module to ship harness files: with `--harness claude` it
-  installs the `freecad-scripts` skill (a `SKILL.md`, ten references and a mesh script)
-  into `.claude/skills/freecad-scripts/`. External stores and their approval are not
+- Two modules ship harness files so far. With `--harness claude`, `cad-freecad` installs
+  the `freecad-scripts` skill (a `SKILL.md`, ten references and a mesh script) into
+  `.claude/skills/freecad-scripts/`, and `formal` installs the `verilog-sby-formal` skill
+  (`SKILL.md` and `reference.md`) into `.claude/skills/verilog-sby-formal/`. For a project that
+  already has one of them, `install.py --add <module> --harness claude --dir <project>`
+  records the harness and installs the files. External stores and their approval are not
   implemented. The decision is
   [ADR 0004](docs/decisions/0004-harness-files-in-modules.md) and the rules are in
   [the specification](docs/specs/module-harness-files.md).

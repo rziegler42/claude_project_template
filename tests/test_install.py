@@ -5429,6 +5429,101 @@ class DeclarationReportTest(HarnessCase):
         self.assertFalse(os.path.exists(self.sentinel))
 
 
+class HarnessFormalTest(ProjectCase):
+    """Plan 0021: the real formal module ships the verilog-sby-formal skill."""
+
+    SKILL = ".claude/skills/verilog-sby-formal"
+    FILES = [SKILL + "/SKILL.md", SKILL + "/reference.md"]
+
+    def tree(self):
+        return install.read_harness_tree(install.load_modules()["formal"], "claude")
+
+    def new_formal(self, with_, *extra):
+        return run([self.target(), "--with", with_, "--git-name", "Test User",
+                    "--git-email", "tester@users.noreply.example.invalid", *extra])
+
+    def manifest(self):
+        return json.loads(self.read(".template-manifest"))
+
+    def test_the_module_ships_exactly_the_skill(self):
+        files, units = self.tree()
+        self.assertEqual(sorted(files), sorted(self.FILES))
+        self.assertEqual(units, {self.SKILL: "verilog-sby-formal"})
+
+    def test_the_text_is_self_contained(self):
+        files, _ = self.tree()
+        for path, data in files.items():
+            self.assertNotIn(b"~/.claude", data, path)
+        self.assertIn("reference.md", files[self.SKILL + "/SKILL.md"].decode("utf-8"))
+        self.assertLess(sum(len(d) for d in files.values()), install.HARNESS_MAX_TREE_BYTES // 20)
+
+    def test_new_with_the_harness_installs_and_records_the_skill(self):
+        code, out, err = self.new_formal("formal", "--harness", "claude")
+        self.assertEqual(code, 0, err)
+        for rel in self.FILES:
+            self.assertTrue(os.path.isfile(self.path(rel)), rel)
+        manifest = self.manifest()
+        self.assertEqual((manifest["schema"], manifest["harness"]), (2, "claude"))
+        self.assertEqual(sorted(manifest["harness_files"]), sorted(self.FILES))
+        for entry in manifest["harness_files"].values():
+            self.assertEqual(entry["modules"], ["formal"])
+
+    def test_new_without_the_harness_installs_nothing_extra(self):
+        self.assertEqual(self.new_formal("formal")[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertEqual(self.manifest()["schema"], 1)
+        self.assertNotIn("harness_files", self.manifest())
+
+    def test_the_add_paths(self):
+        self.assertEqual(self.new_formal("cad")[0], 0)
+        code, out, err = run(["--add", "formal", "--harness", "claude", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), sorted(self.FILES))
+        shutil.rmtree(self.target())
+        self.assertEqual(self.new_formal("cad")[0], 0)
+        self.assertEqual(run(["--add", "formal", "--dir", self.target()])[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+        self.assertNotIn("harness", self.manifest())
+        shutil.rmtree(self.target())
+        self.assertEqual(self.new_formal("cad", "--harness", "claude")[0], 0)
+        self.assertEqual(run(["--add", "formal", "--dir", self.target()])[0], 0)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), sorted(self.FILES))
+        shutil.rmtree(self.target())
+        self.assertEqual(self.new_formal("formal")[0], 0)
+        code, out, err = run(["--add", "formal", "--harness", "claude", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(self.manifest()["harness_files"]), sorted(self.FILES))
+
+    def test_update_leaves_an_unedited_tree_alone_and_keeps_an_edit(self):
+        self.assertEqual(self.new_formal("formal", "--harness", "claude")[0], 0)
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("conflict", out)
+        self.write(self.SKILL + "/reference.md", "my notes\n")
+        code, out, err = self.update()
+        self.assertEqual(code, 0, err)
+        self.assertIn("conflict " + self.SKILL + "/reference.md", out)
+        self.assertEqual(self.read(self.SKILL + "/reference.md"), "my notes\n")
+
+    def test_remove_deletes_the_unedited_skill_and_keeps_an_edit(self):
+        self.assertEqual(self.new_formal("formal", "--harness", "claude")[0], 0)
+        self.write(self.SKILL + "/reference.md", "my notes\n")
+        code, out, err = run(["--remove", "formal", "--dir", self.target()])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(os.listdir(self.path(self.SKILL)), ["reference.md"])
+        self.assertEqual(self.manifest()["harness_files"], {})
+
+    def test_remove_with_no_edits_leaves_no_skill_directory(self):
+        self.assertEqual(self.new_formal("formal", "--harness", "claude")[0], 0)
+        self.assertEqual(run(["--remove", "formal", "--dir", self.target()])[0], 0)
+        self.assertFalse(os.path.exists(self.path(".claude")))
+
+    def test_the_hint_points_at_the_option(self):
+        code, out, err = self.new_formal("formal")
+        self.assertEqual(code, 0, err)
+        self.assertIn("formal: pass --harness claude", out)
+
+
 class HarnessNewProjectTest(HarnessCase):
     """Plan 0018 increment C: --harness with a new project."""
 
